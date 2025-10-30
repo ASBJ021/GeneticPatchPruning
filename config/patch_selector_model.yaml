@@ -1,0 +1,19 @@
+# file to create new ml model 
+task: "create a model"
+model_name: PatchSelectorCNN # create a new model name
+use_clip: true # false
+use_cnn: true # false
+cnn_layers: 2
+optimizer: default # 
+loss_function: BCE # change loss funtions
+
+# device: "cuda"             # or "cpu"
+# num_samples: 1500
+# dataset_name: "clane9/imagenet-100" #"cifar100" #
+# split: "validation" # train test val validation
+# model_id: "ViT-B/16"
+# visualize: False
+
+
+
+

@@ -1,0 +1,26 @@
+# dataset_name: cifar100
+task: "Data Collection"
+device: "cuda"             # or "cpu"
+num_samples: 1500
+dataset_name: "clane9/imagenet-100" #"cifar100" #
+split: "validation" # train test val validation
+model_id: "ViT-B/16"
+visualize: False
+
+# annotations: /home/utn/firi22ka/Desktop/jenga/Adaptive-Tokenization/new_src/clane9/imagenet-100_500_0.3_1758275065.0351467.jsonl
+
+# only to collect data
+keep_pct: 1 # 0 to 1 
+
+# data related 
+# path to save collected data
+annotation_path: "/var/lit2425/jenga/Adaptive-Tokenization/new_src/clane9/imagenet-100_1500_1758042869.1699746.jsonl" # path to annotation file
+# val_ratio: 0.1
+
+# model_checkpoint: "/var/lit2425/jenga/Adaptive-Tokenization/new_src/cp_1221/checkpoint_best.pt" #path to best model checkpoit for evaluation 
+# GA can optionally optimize the keep percentage (number of patches kept).
+optimize_keep: true
+min_keep_pct: 0.1  # lower bound on keep ratio when optimizing
+max_keep_pct: 0.95  # upper bound on keep ratio when optimizing
+keep_penalty: 0.3  # penalty strength for keeping more patches (trade-off)
+
