@@ -1,8 +1,8 @@
 # dataset_name: cifar100
 task: "Data Collection"
 device: "cuda"             # or "cpu"
-num_samples: 1500
-dataset_name: "clane9/imagenet-100" #"cifar100" #
+num_samples: 500  # 0 for full dataset
+dataset_name: "ILSVRC/imagenet-1k" #"cifar100" # "ILSVRC/imagenet-1k"
 split: "validation" # train test val validation
 model_id: "ViT-B/16"
 visualize: False
@@ -14,7 +14,8 @@ keep_pct: 1 # 0 to 1
 
 # data related 
 # path to save collected data
-annotation_path: "/var/lit2425/jenga/Adaptive-Tokenization/new_src/clane9/imagenet-100_1500_1758042869.1699746.jsonl" # path to annotation file
+# annotation_path: "/var/lit2425/jenga/Adaptive-Tokenization/new_src/clane9/imagenet-100_1500_1758042869.1699746.jsonl" # path to annotation file
+save_path: "/var/lit2425/jenga/GeneticPatchPruning/data/"  # path to save collected data
 # val_ratio: 0.1
 
 # model_checkpoint: "/var/lit2425/jenga/Adaptive-Tokenization/new_src/cp_1221/checkpoint_best.pt" #path to best model checkpoit for evaluation 
