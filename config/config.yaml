@@ -1,7 +1,7 @@
 # dataset_name: cifar100
 
 device: "cuda"             # or "cpu"
-num_samples: 1500
+num_samples: 5000
 dataset_name: "clane9/imagenet-100" #"cifar100" #
 split: "validation" # train test val validation
 model_id: "ViT-B/16"
