@@ -1,0 +1,10 @@
+clip @ git+https://github.com/openai/CLIP.git
+datasets
+matplotlib
+numpy
+Pillow
+pyyaml
+timm
+torch
+torchvision
+tqdm

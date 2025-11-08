@@ -1,5 +1,5 @@
 at
-data
+data/*
 model_*
 gpp/__pycache__
 gpp/genetic_algo/__pycache__/
