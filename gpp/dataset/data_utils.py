@@ -47,7 +47,8 @@ def load_data_folder(file_path, num_samples = 0):
 def load_data_normal(DATASET_NAME, NUM_SAMPLES, SPLIT="test"):
     ds = load_dataset(DATASET_NAME,split = SPLIT)
     # ds = ds.shuffle(seed=42).select(range(NUM_SAMPLES))
-    ds = ds.select(range(NUM_SAMPLES))
+    if NUM_SAMPLES > 0:
+        ds = ds.select(range(NUM_SAMPLES))
     print(ds[0])
     names = ds.features["label"].names
     prompts = [f"a photo of a {n.replace('_',' ')}" for n in names]
@@ -292,3 +293,15 @@ def split_dataset(
         )
 
     return pick(idx_train), pick(idx_val), pick(idx_test)
+
+def main():
+    dataset_name = "ILSVRC/imagenet-1k"
+    split = "test"
+    num_samples = 500
+    ds, _ = load_data_normal(dataset_name, num_samples, split)
+    print(ds.shape)
+
+
+
+if __name__ == "__main__":
+    main()
