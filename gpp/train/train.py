@@ -107,7 +107,7 @@ def main():
 
     patch_selector = PatchSelector().to(device)
     criterion = nn.BCEWithLogitsLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=cfg["lr"])
+    optimizer = torch.optim.Adam(patch_selector.parameters(), lr=cfg["lr"])
 
     best_val_loss: Optional[float] = None
     metrics_path = os.path.join(save_dir, "metrics.jsonl")
@@ -137,14 +137,14 @@ def main():
             # convert images to clip [patches]
             patches = images_to_patches(imgs)
             patches = torch.cat(patches, dim=0).to(device)
-            print(len(patches))
-            print(patches[0].shape)
+            # print(len(patches))
+            # print(patches[0].shape)
 
             logits = patch_selector(patches).squeeze(-1) 
-            print(logits.shape)
+            # print(logits.shape)
 
             loss = criterion(logits, targets)
-            print(loss)
+            # print(loss)
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
@@ -156,12 +156,12 @@ def main():
             steps += 1
             # print(f'{total_loss = }')
             # break
-        print(f'{steps = }')
+        # print(f'{steps = }')
         avg_loss = total_loss / max(1, steps)
         avg_acc = total_acc / max(1, steps)
 
-        print(f'{avg_loss = }')
-        print(f'{avg_acc = }')
+        # print(f'{avg_loss = }')
+        # print(f'{avg_acc = }')
         
 
         # Validation
@@ -189,13 +189,13 @@ def main():
                 val_total_loss += loss.item()
                 val_total_acc += accuracy_at_threshold(logits, targets)
                 val_steps += 1
-        print(f'val steps {val_steps }')
+        # print(f'val steps {val_steps }')
 
         avg_val_loss = val_total_loss / max(1, val_steps)
         avg_val_acc = val_total_acc / max(1, val_steps)
         # val_acc = v_acc / max(1, v_steps)
-        print(f'{avg_val_loss = }')
-        print(f'{avg_val_acc = }')
+        # print(f'{avg_val_loss = }')
+        # print(f'{avg_val_acc = }')
 
         log = {
             "epoch": epoch,
@@ -209,7 +209,7 @@ def main():
 
         checkpoint = {
             "epoch": epoch,
-            "model_state_dict": model.state_dict(),
+            "model_state_dict": patch_selector.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
             "train_loss": avg_loss,
             "val_loss": avg_val_loss,

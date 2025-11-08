@@ -109,7 +109,7 @@ def main():
     # load dataset
     print(f'{dataset_name = }')
     print(f'{num_samples = }')
-    ds, _ = load_data_normal(dataset_name, num_samples, data_split)
+    ds,  = load_data_normal(dataset_name, num_samples, data_split)
     # print(ds)
 
     full_dataset = PatchIndexDataset(ds=ds, jsonl_path=annotation_path, img_size=img_size)
