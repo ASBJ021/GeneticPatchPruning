@@ -2,7 +2,7 @@
 task: "training"
 exp_name: "Test" # name your experiment
 device: "cuda"             # or "cpu"
-num_samples: 1500
+num_samples: 5000
 dataset_name: "clane9/imagenet-100" #"cifar100" #
 split: "validation" # train test val validation
 model_id: "ViT-B/16"
@@ -14,13 +14,13 @@ data_split_ratio: [0.7, 0.15, 0.15] # [train, val, test] split ratios
 num_classes: 196 # toal number of patches of size 16*16 = 196  (14*14)
 
 # Training
-batch_size: 2
-epochs: 2
+batch_size: 32
+epochs: 50
 lr: 0.0001
 img_size: 224
 num_workers: 2
 device: cuda
-save_dir: "./model_checkpoints"
+save_dir: "./model_checkpoints_ep50"
 seed: 42
 
 # Prediction export
@@ -28,4 +28,4 @@ predictions_jsonl: "predictions.jsonl"
 pred_thresh: 0.5
 
 #testing 
-model_checkpoint: "/var/lit2425/jenga/Adaptive-Tokenization/new_src/cp_1221/checkpoint_best.pt" 
+model_checkpoint: "/var/lit2425/jenga/GeneticPatchPruning/gpp/model_checkpoints_ep50/Test/checkpoint_best.pt" 
