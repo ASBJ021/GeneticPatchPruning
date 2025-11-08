@@ -20,13 +20,15 @@ import time
 
 # ─── Load Config ─────────────────────────────────────────────────────
 # cfg_path = os.path.join(os.path.dirname(__file__), "config.yaml")
-cfg_path = '/var/lit2425/jenga/GeneticPatchPruning/config/config.yaml'
+cfg_path = '/var/lit2425/jenga/GeneticPatchPruning/config/data_colletion.yaml'
 
 print(f'{cfg_path = }')
 cfg = load_config(cfg_path)
 print(f'{cfg = }')
 device = resolve_device(cfg)
 
+task = cfg["task"]
+save_path = cfg.get("save_path", "./data/")
 num_samples = cfg["num_samples"]
 dataset_name = cfg["dataset_name"]
 data_split = cfg['split']
@@ -37,7 +39,7 @@ optimize_keep = cfg.get("optimize_keep", False)
 min_keep_pct = cfg.get("min_keep_pct", 0.1)
 max_keep_pct = cfg.get("max_keep_pct", 0.9)
 keep_penalty = cfg.get("keep_penalty", 0.1)
-ml_model = cfg["model_checkpoint"]
+# ml_model = cfg["model_checkpoint"]
 # ─── Load Model ──────────────────────────────────────────────────────
 model, processor = load_clip(model_id, device)
 
@@ -46,16 +48,16 @@ model, processor = load_clip(model_id, device)
 def main():
 
     print(
-        f"Evaluating on {'full' if num_samples == 0 else num_samples} samples of {dataset_name} dataset"
+        f"Creating data from {'full' if num_samples == 0 else num_samples} samples of {dataset_name} dataset"
     )
 
     dataset, prompts = load_data_normal(dataset_name, num_samples, SPLIT=data_split)
     # print(f'{prompts =}')
 
-    out_path_jsonl = f"{dataset_name}_{num_samples}_final_patches_{int(keep_pct * 100)}.jsonl"
+    # out_path_jsonl = f"{dataset_name}_{num_samples}_final_patches_{int(keep_penalty * 100)}.jsonl"
     # Preserve original behavior: override path with hard-coded target
     out_path_jsonl = (
-        f"/var/lit2425/jenga/GeneticPatchPruning/data/{dataset_name}_{num_samples}_{keep_penalty}_{time.time()}.jsonl"
+        f"{save_path}{dataset_name}/{num_samples}_{keep_penalty}_{time.time()}.jsonl"
     )
 
     # out_path_jsonl = '/home/utn/firi22ka/Desktop/jenga/Adaptive-Tokenization/new_src/clane9/imagenet-100_500_0.5_1758265212.1184783.jsonl'
