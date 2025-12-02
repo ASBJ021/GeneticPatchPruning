@@ -2,6 +2,7 @@ from typing import List, Tuple
 import torch
 import torch.nn.functional as F
 import clip
+import time
 
 
 def load_clip(model_id: str, device: str):
@@ -103,3 +104,4 @@ def cls_from_masked_tokens(model, device: str, x, indices_to_remove: List[int]):
     img_feat = cls_token @ model.visual.proj if model.visual.proj is not None else cls_token
     img_feat /= img_feat.norm(dim=-1, keepdim=True)
     return img_feat
+

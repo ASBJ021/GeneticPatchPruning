@@ -5,3 +5,5 @@ gpp/__pycache__
 gpp/genetic_algo/__pycache__/
 gpp/model/__pycache__/
 gpp/utils/__pycache__/
+results/*
+benchmarking

@@ -6,6 +6,7 @@ from PIL import Image, ImageDraw
 import argparse
 import time
 import numpy as np
+import csv, json
 # Ensure project root is available on sys.path when running the script directly
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -50,7 +51,8 @@ batch_size = cfg["batch_size"]
 seed = cfg["seed"]
 # num_workers = cfg["num_workers"]
 # epochs = cfg["epochs"]
-# save_dir = cfg["save_dir"]
+out_dir = cfg["res_dir"]
+out_dir = os.path.join(out_dir, f"{exp_name}_{int(time.time())}")
 # exp_name = cfg["exp_name"]
 
 ckpt_path = cfg["model_checkpoint"]
@@ -70,18 +72,20 @@ def get_text_features(prompts, model=clip_model) -> torch.Tensor:
 @torch.no_grad()
 def get_image_feature_full(model, pixel_values: torch.Tensor) -> torch.Tensor:
     img_f = model.encode_image(pixel_values)
+    # print(f'{img_f.shape = }')
     img_f = img_f / img_f.norm(dim=-1, keepdim=True)
     return img_f
 
 
-def img_to_patch(img, selector, text_features, thresh=0.5):
+def img_to_patch(img, selector, text_features, pixel_values, thresh=0.5):
     
     # pil_img = to_pil(img)
-    pixel_values = processor(img).unsqueeze(0).to(device)
+    # pixel_values = processor(img).unsqueeze(0).to(device)
     with torch.no_grad():
         x = clip_model.visual.conv1(pixel_values)
         B, D, H, W = x.shape
         x = x.reshape(B, D, -1).permute(0, 2, 1)
+        # print(f'{x.shape = }')
 
         cls_token = clip_model.visual.class_embedding.unsqueeze(0).expand(B, -1, -1)
         tokens = torch.cat([cls_token, x], dim=1)
@@ -118,7 +122,7 @@ def img_to_patch(img, selector, text_features, thresh=0.5):
         ga_top1_prob = probs_ga[0, ga_top1].item()
 
     pred = ga_top1
-    return ga_top1
+    return ga_top1, selectd_idx
 
 
 
@@ -198,17 +202,23 @@ def save_heatmap(img: Image.Image, selected_idx: List[int], grid_hw: Tuple[int, 
         if prev_interactive:
             plt.ion()
 
+def evaluate_gpp(model, dataset, prompts, device, num_samples=0):
+    
+
+    pass
+
 def main():
     
     parser = argparse.ArgumentParser(description="Compare original CLIP vs GA-selected patches per image and save visuals.")
     # parser.add_argument("--config", type=str, default=os.path.join(os.path.dirname(__file__), "config.yaml"), help="Path to config.yaml")
-    parser.add_argument("--out_dir", type=str, default=os.path.join(os.path.dirname(__file__), f"results/compare_outputs_{exp_name}_{time.time()}"), help="Directory to save outputs")
+    # parser.add_argument("--out_dir", type=str, default=os.path.join(os.path.dirname(__file__), f"../../results/compare_outputs/{exp_name}_{time.time()}"), help="Directory to save outputs")
     parser.add_argument("--limit", type=int, default=0, help="Optional limit on number of records to process (0=all)")
     args = parser.parse_args()
 
 
     # patchselector = PatchSelector()
     # ckpt = torch.load(ckpt_path)
+    print(f'Evaluating on dataset: {dataset_name} | split: {data_split} ')
     print(f'Evaluating on number of samples: {num_samples}')
     selector = PatchSelector().to(device).eval()
     state = torch.load(ckpt_path, map_location=device)
@@ -216,19 +226,22 @@ def main():
     selector.eval()
     # print(f'{selector = }')
 
-    ds, prompts = load_data_normal("clane9/imagenet-100", NUM_SAMPLES=num_samples, SPLIT=data_split)
-    # sample = ds[120]
+    # make sure result directories exist
+    ensure_dir(out_dir)
+    images_dir = os.path.join(out_dir, "images")
+    ensure_dir(images_dir)
+
+    summary_rows = []
+    probs_dir = os.path.join(out_dir, "probs")
+    ensure_dir(probs_dir)
+
+    ds, prompts = load_data_normal(dataset_name, NUM_SAMPLES=num_samples, SPLIT=data_split)
+    label_names = ds.features["label"].names
+
     text_features = get_text_features(prompts)
-    print(f'{text_features.shape = }')
+    # print(f'{text_features.shape = }')
 
-    # img = sample['image']
-    # gt = int(sample["label"])
-    # pil_img = to_pil(img)
-
-    # pred = img_to_patch(img, selector, text_features)
-    # patches = torch.cat(patches, dim=0).to(device)
-
-    # print(f'{gt = } & {pred = }')
+    
     og_total_acc = 0
     ga_total_acc = 0
     count = 0
@@ -236,19 +249,21 @@ def main():
 
 
     for id in range(start, num_samples):
+        print(f'Processing sample {id} ...')
         sample = ds[int(id)]
         img = sample['image']
         gt = int(sample["label"])
         pixel_values = processor(img).unsqueeze(0).to(device)
+        H = W = 14  # for ViT-B/16 on 224x224 images
 
 
         # Original CLIP probabilities
         img_f_full = get_image_feature_full(clip_model, pixel_values)
+        # print(f'{img_f_full.shape = }')
         probs_og = (100 * img_f_full @ text_features.T).softmax(-1)
 
-
-
-        pred_ga = img_to_patch(img, selector, text_features)
+        pred_ga, selected = img_to_patch(img, selector, text_features, pixel_values)
+        # print(f'selected count for image {id} : {len(selected)}')
 
         pred_og = torch.argmax(probs_og, dim=-1).item()
         # print(f'Image {id}: GT: {gt} | OG Pred: {og_top1} | GA Pred: {pred_ga}')
@@ -264,6 +279,49 @@ def main():
             # print(f'GA Correct Prediction for sample {id}: {gt = } & {pred = }')
             ga_total_acc+=1
         count+=1
+
+         # Save original image
+        img_path = os.path.join(images_dir, f"{id}_orig.jpg")
+        save_image_copy(img, img_path)
+
+        # Save heatmap overlay (selected patches = 1.0)
+        heatmap_path = os.path.join(images_dir, f"{id}_heatmap.png")
+        save_heatmap(img.copy(), selected, (H, W), heatmap_path, alpha=0.5)
+
+        # # Save boxes overlay
+        # boxes_path = os.path.join(images_dir, f"{id}_boxes.png")
+        # draw_boxes_on_image_with_preprocess(img.copy(), selected, clip_model, processor, boxes_path)
+
+        with open(os.path.join(probs_dir, f"{id:05d}.json"), "w", encoding="utf-8") as f:
+            json.dump({
+                "image_id": id,
+                "gt": gt,
+                "pred_og": {"label": label_names[pred_og]},
+                "pred_ga": {"label": label_names[pred_ga], "selected_count": len(selected), "selected_pct": len(selected)/196}
+            }, f, indent=2)
+
+        summary_rows.append({
+            "image_id": id,
+            "gt": gt,
+            "base clip": [pred_og],
+            "base label": label_names[pred_og],
+            "GA_pred": pred_ga,
+            "GA_label": label_names[pred_ga],
+            "selected_count": len(selected),
+            "selected_pct": len(selected) / 196
+        })
+
+    csv_path = os.path.join(out_dir, "summary.csv")
+    if summary_rows:
+        with open(csv_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=list(summary_rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(summary_rows)
+
+    print(f"Saved images to: {images_dir}")
+    print(f"Saved per-image probabilities to: {probs_dir}")
+    print(f"Saved summary CSV to: {csv_path}")
+
 
     
     print(f'Original CLIP Accuracy: {og_total_acc/count*100 :.2f} %')
