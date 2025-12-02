@@ -1,0 +1,31 @@
+# dataset_name: cifar100
+task: "Benchmarking"
+device: "cuda"             # or "cpu"
+num_samples: 100
+dataset_name: "clane9/imagenet-100" #"cifar100" #
+split: "validation" # train test val validation
+
+visualize: False
+
+# annotations: /home/utn/firi22ka/Desktop/jenga/Adaptive-Tokenization/new_src/clane9/imagenet-100_500_0.3_1758275065.0351467.jsonl
+
+# only to collect data
+keep_pct: 1 # 0 to 1 
+
+# data related
+annotation_path: "/home/utn/firi22ka/Desktop/jenga/GeneticPatchPruning/data/ILSVRC/imagenet-1k/500_0.3_1762594505.0590034.jsonl" # path to annotation file
+
+# Prediction export
+predictions_jsonl: ./checkpoints01/predictions.jsonl
+pred_thresh: 0.5
+
+#models
+model_id: "ViT-B/16"
+gpp_model_checkpoint: "/var/lit2425/jenga/GeneticPatchPruning/gpp/model_checkpoints_ep50/Test/checkpoint_best.pt" 
+
+#benchmarks  # 
+strategies: ["clip","gpp"]
+metrics: ["accuracy","avg_inference_time","avg_tokens_used"]
+
+
+

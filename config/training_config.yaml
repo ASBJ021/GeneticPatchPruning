@@ -1,9 +1,9 @@
 # dataset_name: cifar100
 task: "training"
-exp_name: "Test" # name your experiment
+exp_name: "Eval-imagenet-1k" # name your experiment
 device: "cuda"             # or "cpu"
 num_samples: 5000
-dataset_name: "clane9/imagenet-100" #"cifar100" #
+dataset_name: "ILSVRC/imagenet-1k" #"cifar100" # "ILSVRC/imagenet-1k"
 split: "validation" # train test val validation
 model_id: "ViT-B/16"
 visualize: False
@@ -29,3 +29,5 @@ pred_thresh: 0.5
 
 #testing 
 model_checkpoint: "/var/lit2425/jenga/GeneticPatchPruning/gpp/model_checkpoints_ep50/Test/checkpoint_best.pt" 
+res_dir: "results" # direcrotory to save results
+ 
