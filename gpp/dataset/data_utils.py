@@ -44,7 +44,7 @@ def load_data_folder(file_path, num_samples = 0):
         dict_data = pickle.load(fo, encoding='bytes')
     return dict_data
   
-def load_data_normal(DATASET_NAME, NUM_SAMPLES, SPLIT="test"):
+def load_data_normal(DATASET_NAME, NUM_SAMPLES, SPLIT="validation"):
     ds = load_dataset(DATASET_NAME,split = SPLIT)
     # ds = ds.shuffle(seed=42).select(range(NUM_SAMPLES))
     if NUM_SAMPLES > 0:
