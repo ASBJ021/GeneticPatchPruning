@@ -19,6 +19,8 @@ from typing import List, Dict, Any, Optional, Tuple
 import torch
 
 from PIL import Image
+import random
+from collections import defaultdict
 
 
 
@@ -39,11 +41,86 @@ def load_data(DATASET_NAME, NUM_SAMPLES):
     return ds, prompts
 
 
-def load_data_folder(file_path, num_samples = 0):
-    with open(file_path, 'rb') as fo:
-        dict_data = pickle.load(fo, encoding='bytes')
-    return dict_data
-  
+def load_data_folder(DATA_DIR, NUM_SAMPLES, SPLIT="validation", cache_dir= "/home/vault/v123be/v123be15/hf_cache"):
+    # cache_dir = '/home/vault/v123be/v123be15/hf_cache'
+    train_files = {"train": DATA_DIR + "train-*.parquet"}
+    test_files = {"test": DATA_DIR + "test-*.parquet"}
+    val_files = {"validation": DATA_DIR + "validation-*.parquet"}
+    split = SPLIT
+    print(f'Loading {split} data from {DATA_DIR}')
+    if split == "train":
+        ds = load_dataset("parquet", data_files=train_files, split=split, cache_dir=cache_dir)
+    elif split == "test":
+        ds = load_dataset("parquet", data_files=test_files, split=split, cache_dir=cache_dir)
+    elif split == "val" or split == "validation":
+        ds = load_dataset("parquet", data_files=val_files, split=split, cache_dir=cache_dir)
+
+    if NUM_SAMPLES > 0:
+        ds = ds.select(range(NUM_SAMPLES))
+
+
+    print(ds[0])
+
+    names = ds.features["label"].names
+    prompts = [f"a photo of a {n.replace('_',' ')}" for n in names]
+
+    return ds, prompts
+
+
+def load_data_folder_mixed_samples(DATA_DIR, NUM_SAMPLES, SPLIT="test", seed=42):
+    """
+    Load a parquet ImageNet dataset split and optionally select samples from different classes.
+    """
+    random.seed(seed)
+    train_files = {"train": f"{DATA_DIR}/train-*.parquet"}
+    test_files  = {"test": f"{DATA_DIR}/test-*.parquet"}
+    val_files   = {"validation": f"{DATA_DIR}/validation-*.parquet"}
+
+    print(f"Loading {SPLIT} data from {DATA_DIR}")
+    if SPLIT == "train":
+        ds = load_dataset("parquet", data_files=train_files, split="train")
+    elif SPLIT in ["test"]:
+        ds = load_dataset("parquet", data_files=test_files, split="test")
+    elif SPLIT in ["val", "validation"]:
+        ds = load_dataset("parquet", data_files=val_files, split="validation")
+    else:
+        raise ValueError(f"Unknown split: {SPLIT}")
+
+    # If NUM_SAMPLES > 0, select samples distributed across classes
+    if NUM_SAMPLES > 0:
+        labels = ds["label"]
+        n_classes = len(ds.features["label"].names)
+        per_class = max(1, NUM_SAMPLES // n_classes)
+
+        class_to_indices = defaultdict(list)
+        for i, lbl in enumerate(labels):
+            class_to_indices[lbl].append(i)
+
+        selected_indices = []
+        for lbl, idxs in class_to_indices.items():
+            if len(idxs) > per_class:
+                selected_indices.extend(random.sample(idxs, per_class))
+            else:
+                selected_indices.extend(idxs)
+
+        # If we got fewer than NUM_SAMPLES (because of rounding or few samples per class),
+        # pad with random remaining indices
+        if len(selected_indices) < NUM_SAMPLES:
+            remaining = list(set(range(len(ds))) - set(selected_indices))
+            extra = random.sample(remaining, min(len(remaining), NUM_SAMPLES - len(selected_indices)))
+            selected_indices.extend(extra)
+
+        ds = ds.select(selected_indices)
+
+    print("Example:", ds[0])
+    print(f"Loaded {len(ds)} samples from {len(ds.features['label'].names)} classes.")
+
+    # Create CLIP-style text prompts
+    names = ds.features["label"].names
+    prompts = [f"a photo of a {n.replace('_', ' ')}" for n in names]
+
+    return ds, prompts
+    
 def load_data_normal(DATASET_NAME, NUM_SAMPLES, SPLIT="test"):
     ds = load_dataset(DATASET_NAME,split = SPLIT)
     # ds = ds.shuffle(seed=42).select(range(NUM_SAMPLES))
@@ -53,6 +130,8 @@ def load_data_normal(DATASET_NAME, NUM_SAMPLES, SPLIT="test"):
     names = ds.features["label"].names
     prompts = [f"a photo of a {n.replace('_',' ')}" for n in names]
     return ds, prompts
+
+
 
 
 def plot_dataset(ds, prompts):
@@ -88,7 +167,7 @@ def build_dataloaders(
     img_size: int,
     batch_size: int,
     num_workers: int,
-    num_classes: int | None,
+    num_classes: int,
     val_ratio: float,
 ) -> Tuple[DataLoader, DataLoader, int]:
     t = None
@@ -296,10 +375,40 @@ def split_dataset(
 
 def main():
     dataset_name = "ILSVRC/imagenet-1k"
-    split = "test"
-    num_samples = 500
-    ds, _ = load_data_normal(dataset_name, num_samples, split)
-    print(ds.shape)
+    data_dir = "/home/vault/v123be/v123be15/imagenet-1k/data/"
+    train_files = {"train": data_dir + "train-*.parquet"}
+    test_files = {"test": data_dir + "test-*.parquet"}
+    val_files = {"validation": data_dir + "validation-*.parquet"}
+
+    split = "validation"
+    cache_dir = '/home/vault/v123be/v123be15/hf_cache'
+
+    # num_samples = 10
+    # if split == "train":
+    #     ds = load_dataset("parquet", data_files=train_files, split=split)
+    # elif split == "test":
+    #     ds = load_dataset("parquet", data_files=test_files, split=split)
+    # elif split == "val" or split == "validation":
+    #     ds = load_dataset("parquet", data_files=val_files, split=split)
+
+    # ds = load_dataset("parquet", data_files=test_files, split=split)
+    
+    # features = ds.features
+    # classes = ds.features["label"].names
+    # print(f'{classes.shape = }')
+    # print(f'{classes = }')
+    # if "label" in features and hasattr(features["label"], "names"):
+    #     # HF mapping (often WNIDs or human names depending on how it was built)
+    #     hf_idx_to_name = features["label"].names
+    #     print(f'{hf_idx_to_name = }')
+
+    ds = load_data_folder(data_dir, NUM_SAMPLES=100, SPLIT=split, cache_dir=cache_dir)
+    # mixed_ds = load_data_folder_mixed_samples(data_dir, NUM_SAMPLES=100, SPLIT=split)
+    print(ds[0])
+    print(ds)
+
+    # ds, _ = load_data_normal(dataset_name, num_samples, split)
+    # print(ds.shape)
 
 
 
