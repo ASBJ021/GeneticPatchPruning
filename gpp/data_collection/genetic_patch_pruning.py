@@ -9,7 +9,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from gpp.dataset.data_utils import load_data_normal
+from gpp.dataset.data_utils import load_data_normal, load_data_folder
 from gpp.utils.visual_utils import patchify, viz_patches
 
 from gpp.genetic_algo.config import load_config, resolve_device, default_config_path
@@ -20,19 +20,26 @@ import time
 
 # ─── Load Config ─────────────────────────────────────────────────────
 # cfg_path = os.path.join(os.path.dirname(__file__), "config.yaml")
-cfg_path = '/var/lit2425/jenga/GeneticPatchPruning/config/data_colletion.yaml'
+cfg_path = '/home/atuin/v123be/v123be15/GeneticPatchPruning/config/data_colletion.yaml'
 
 print(f'{cfg_path = }')
 cfg = load_config(cfg_path)
 print(f'{cfg = }')
-device = resolve_device(cfg)
-
+device = cfg["device"]
+# device = resolve_device(device)
 task = cfg["task"]
+# print(f'{task = }')
+# ─── Load Data Config ────────────────────────────────────────────────
 save_path = cfg.get("save_path", "./data/")
 num_samples = cfg["num_samples"]
 dataset_name = cfg["dataset_name"]
+data_dir = cfg["data_dir"]
+# print(f'{data_dir = }')
 data_split = cfg['split']
-model_id = cfg["model_id"]
+# print(f'{data_split = }')
+cache_dir = cfg['cache_dir']
+# print(f'{cache_dir = }')
+# ─── Load GA config ────────────────────────────────────────────────
 keep_pct = cfg["keep_pct"]
 viz = cfg["visualize"]
 optimize_keep = cfg.get("optimize_keep", False)
@@ -41,6 +48,9 @@ max_keep_pct = cfg.get("max_keep_pct", 0.9)
 keep_penalty = cfg.get("keep_penalty", 0.1)
 # ml_model = cfg["model_checkpoint"]
 # ─── Load Model ──────────────────────────────────────────────────────
+model_id = cfg["model_id"] # clip model id
+print(f'Loading and Using model: {model_id} on {device}...')
+
 model, processor = load_clip(model_id, device)
 
 
@@ -51,16 +61,20 @@ def main():
         f"Creating data from {'full' if num_samples == 0 else num_samples} samples of {dataset_name} dataset"
     )
 
-    dataset, prompts = load_data_normal(dataset_name, num_samples, SPLIT=data_split)
+    # dataset, prompts = load_data_normal(dataset_name, num_samples, SPLIT=data_split)
+
+    dataset, prompts = load_data_folder(data_dir, num_samples, SPLIT=data_split, cache_dir=cache_dir)
+
     # print(f'{prompts =}')
 
     # out_path_jsonl = f"{dataset_name}_{num_samples}_final_patches_{int(keep_penalty * 100)}.jsonl"
     # Preserve original behavior: override path with hard-coded target
-    out_path_jsonl = (
-        f"{save_path}{dataset_name}/{num_samples}_{keep_penalty}_{time.time()}.jsonl"
-    )
+    # out_path_jsonl = (
+    #     f"{save_path}{dataset_name}/{num_samples}_{keep_penalty}.jsonl"
+    # )
+    
 
-    # out_path_jsonl = '/home/utn/firi22ka/Desktop/jenga/Adaptive-Tokenization/new_src/clane9/imagenet-100_500_0.5_1758265212.1184783.jsonl'
+    out_path_jsonl = '/home/atuin/v123be/v123be15/GeneticPatchPruning/data/ILSVRC/imagenet-1k/0_0.3.jsonl'
 
     _ = patch_modified_clip(
         dataset,

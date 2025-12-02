@@ -1,0 +1,23 @@
+#!/bin/bash
+#SBATCH --job-name=data_collection
+#SBATCH --output=results/genetic_patch_pruning_%j.log
+#SBATCH --error=logs/genetic_patch_pruning_%j.err
+#SBATCH --time=24:00:00
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --gres=gpu:a40:1
+#SBATCH --mail-user=akashkumar.jain@utn.de
+#SBATCH --mail-type=ALL
+
+export http_proxy=http://proxy:80
+export https_proxy=http://proxy:80
+
+
+# Load environment
+source /home/atuin/v123be/v123be15/GeneticPatchPruning/at_3.9/bin/activate
+
+# Change to project root
+cd /home/atuin/v123be/v123be15/GeneticPatchPruning
+
+# Run the genetic patch pruning script
+python gpp/data_collection/genetic_patch_pruning.py
