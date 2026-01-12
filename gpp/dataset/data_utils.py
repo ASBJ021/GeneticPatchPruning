@@ -64,6 +64,8 @@ def load_data_folder(DATA_DIR, NUM_SAMPLES, SPLIT="validation", cache_dir= "/hom
     names = ds.features["label"].names
     prompts = [f"a photo of a {n.replace('_',' ')}" for n in names]
 
+
+
     return ds, prompts
 
 
