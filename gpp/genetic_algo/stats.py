@@ -2,21 +2,8 @@ import os
 import json
 from typing import Any, Dict, List, Tuple, Optional
 from collections import defaultdict, Counter
-<<<<<<< HEAD
 from math import floor
 
-=======
-import csv
-from math import floor
-from pathlib import Path
-
-def load_summary(path):
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"Could not find summary file at {path}")
-    with path.open("r", encoding="utf-8", newline="") as csv_file:
-        return list(csv.DictReader(csv_file))
-    
->>>>>>> 8ee67e8bead4722f8f0fd938cba7e1956063a4fb
 def normalize_pct(value: Optional[str]) -> Optional[float]:
     """Convert stored ratios/percentages into 0–100 scale."""
     if value in (None, ""):

@@ -4,12 +4,14 @@ exp_name: "Eval-imagenet-1k" # name your experiment
 device: "cuda"             # or "cpu"
 num_samples: 5000
 dataset_name: "ILSVRC/imagenet-1k" #"cifar100" # "ILSVRC/imagenet-1k"
+data_dir: "/home/vault/v123be/v123be15/imagenet-1k/data/"
+cache_dir: "/home/vault/v123be/v123be15/hf_cache" 
 split: "validation" # train test val validation
 model_id: "ViT-B/16"
 visualize: False
 
 # data related
-annotation_path: "/var/lit2425/jenga/GeneticPatchPruning/data/clane9/imagenet-100_1500_1758042869.1699746.jsonl" # path to annotation file
+annotation_path: "./data/ILSVRC/imagenet-1k/0_0.3.jsonl" # path to annotation file
 data_split_ratio: [0.7, 0.15, 0.15] # [train, val, test] split ratios
 num_classes: 196 # toal number of patches of size 16*16 = 196  (14*14)
 

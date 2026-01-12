@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/bash -l
 #SBATCH --job-name=data_collection
 #SBATCH --output=results/genetic_patch_pruning_%j.log
 #SBATCH --error=logs/genetic_patch_pruning_%j.err
@@ -14,10 +14,13 @@ export https_proxy=http://proxy:80
 
 
 # Load environment
+# module purge
+# module load python 
 source /home/atuin/v123be/v123be15/GeneticPatchPruning/at_3.9/bin/activate
 
 # Change to project root
 cd /home/atuin/v123be/v123be15/GeneticPatchPruning
 
-# Run the genetic patch pruning script
+# # Run the genetic patch pruning script
 python gpp/data_collection/genetic_patch_pruning.py
+# python -c "import torch; print('cuda available:', torch.cuda.is_available())"

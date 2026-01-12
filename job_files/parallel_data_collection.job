@@ -1,0 +1,18 @@
+#!/bin/bash -l
+#SBATCH --job-name=parallel_data_collection
+#SBATCH --output=p_results/parallel_gpp_%j.log
+#SBATCH --error=p_logs/parallel_gpp_%j.err
+#SBATCH --time=24:00:00
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=8
+#SBATCH --gres=gpu:a40:8
+#SBATCH --mail-user=akashkumar.jain@utn.de
+#SBATCH --mail-type=ALL
+
+export http_proxy=http://proxy:80
+export https_proxy=http://proxy:80
+
+source /home/atuin/v123be/v123be15/GeneticPatchPruning/at_3.9/bin/activate
+cd /home/atuin/v123be/v123be15/GeneticPatchPruning
+
+srun python gpp/data_collection/parallel_gpp.py
