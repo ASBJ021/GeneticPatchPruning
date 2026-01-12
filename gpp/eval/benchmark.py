@@ -12,9 +12,9 @@ if str(ROOT) not in sys.path:
 from gpp.dataset.data_utils import load_data_normal
 # from gpp.model.clip_model import original_clip
 from gpp.eval.compare import display_comparison_tables
-from gpp.model.model import PatchSelector, images_to_patches
+from gpp.model.model import PatchSelector, images_to_patches, SimplePatchSelector, PatchSelectorWithSoftmax, SimplePatchSelectorWithDropout, PatchSelectorResBlock
 from gpp.model.clip_model import forward_with_selected_patches, load_clip
-from gpp.eval.evaluate import img_to_patch, get_image_feature_full, get_text_features
+from gpp.eval.evaluate import img_to_patch, get_image_feature_full, get_text_features, img_to_patch_with_sigmoid
 
 import clip
 import time
@@ -43,19 +43,38 @@ def original_clip(model, proc, dataset, prompts, txt_f ,MODEL_ID, DEVICE):
 
 def gpp_eval(selector, clip_model, clip_proc, dataset, prompts, text_features, MODEL_ID, DEVICE):
     total_time, correct = 0.0, 0
+    total_keep_pct = 0.0
     start_time = time.time()
     for item in dataset:
         img, label = item["image"], item["label"]
         pixel_values = clip_proc(img).unsqueeze(0).to(DEVICE)
         H = W = 14  # for ViT-B/16 on 224x224 images
         pred_ga, selected = img_to_patch(img, selector, text_features, pixel_values)
+        keep_pct = len(selected)/(H*W)
+        total_keep_pct += keep_pct
         correct += (pred_ga == label)
     total_time = time.time() - start_time
-    return correct / len(dataset), total_time / len(dataset)
+   
+    return correct / len(dataset), total_time / len(dataset), total_keep_pct / len(dataset)
+
+def gpp_eval_sigmoid(selector, clip_model, clip_proc, dataset, prompts, text_features, MODEL_ID, DEVICE):
+    total_time, correct = 0.0, 0
+    total_keep_pct = 0.0
+    start_time = time.time()
+    for item in dataset:
+        img, label = item["image"], item["label"]
+        pixel_values = clip_proc(img).unsqueeze(0).to(DEVICE)
+        H = W = 14  # for ViT-B/16 on 224x224 images
+        pred_ga, selected = img_to_patch_with_sigmoid(img, selector, text_features, pixel_values)
+        keep_pct = len(selected)/(H*W)
+        total_keep_pct += keep_pct
+        correct += (pred_ga == label)
+    total_time = time.time() - start_time
+   
+    return correct / len(dataset), total_time / len(dataset), total_keep_pct / len(dataset)
 
 def main():
     # ─── load config.yaml ────────────────────────────────────────────────
-    # cfg_path = os.path.join(os.path.dirname(__file__), "config.yaml")
     cfg_path = "/home/utn/firi22ka/Desktop/jenga/GeneticPatchPruning/config/benchmark.yaml"
     with open(cfg_path, "r") as f:
         cfg = yaml.safe_load(f)
@@ -71,15 +90,17 @@ def main():
     data_split = cfg["split"]
     # loading checkpoint path
     gpp_ckpt = cfg["gpp_model_checkpoint"]
+    mlp = cfg["mlp"]
     # ───────────────────────────────────────────────────────────────────────
 
     # 1) sampling info
     
     print(f'Evaluating on dataset: {dataset_name} | split: {data_split} ')
+    print(f'Model CKpt path: {gpp_ckpt}')
     if num_samples != 0:
         print(f'Evaluating on number of samples: {num_samples}')
     else:
-        print(f"Evaluating on full {dataset_name} dataset")
+        print(f"Evaluating on full {dataset_name} dataset | split: {data_split}")
 
     # 2) load data & baseline
     dataset, prompts = load_data_normal(dataset_name, num_samples, data_split)
@@ -99,24 +120,53 @@ def main():
 
     records = []
     for strat in strategies:
+        print(f"\n Running strategy: {strat} ")
         if strat == "clip":
             orig_acc, orig_time = original_clip(clip_model, clip_proc, dataset, prompts, text_features, model_id, device)
             records.append({
                 'strategy':      strat,
-                'keep_pct':      1.0,
+                'keep_pct':      100,
                 'accuracy':      orig_acc,
                 'avg_time':      orig_time
             })
         elif strat == "gpp":
-            selector = PatchSelector().to(device).eval()
+            model_load_time_start = time.time()
+            if mlp == "PatchSelector":
+                print(f'Training started using MLP: {mlp}')
+                selector = PatchSelector().to(device)
+            elif mlp == "PatchSelectorWithSoftmax":
+                print(f'Training started using MLP: {mlp}')
+                selector = PatchSelectorWithSoftmax().to(device)
+            elif mlp == "SimplePatchSelector":
+                print(f'Training started using MLP: {mlp}')
+                selector = SimplePatchSelector().to(device)
+            elif mlp == "SimplePatchSelectorWithDropout":
+                print(f'Training started using MLP: {mlp}')
+                selector = SimplePatchSelectorWithDropout().to(device)
+            elif mlp == "PatchSelectorResBlock":
+                print(f'Training started using MLP: {mlp}')
+                selector = PatchSelectorResBlock().to(device)
+            else: 
+                print(f"Please select an MLP in {cfg_path}")
+                return
+
+            # selector = PatchSelector().to(device).eval()
             state = torch.load(gpp_ckpt, map_location=device)
             print(f"Loading GPP model from checkpoint: {gpp_ckpt}")
             selector.load_state_dict(state.get("model_state_dict", state))
             selector.eval()
-            gpp_acc, gpp_time = gpp_eval(selector, clip_model, clip_proc, dataset, prompts, text_features, model_id, device)
+            model_load_time_end = time.time()
+            print(f"GPP model loaded in {model_load_time_end - model_load_time_start:.2f} seconds.")
+
+            if mlp == "PatchSelectorWithSoftmax":
+                gpp_acc, gpp_time, avg_keep_pct = gpp_eval_sigmoid(selector, clip_model, clip_proc, dataset, prompts, text_features, model_id, device)
+            else:
+                gpp_acc, gpp_time, avg_keep_pct = gpp_eval(selector, clip_model, clip_proc, dataset, prompts, text_features, model_id, device)
+                
+            print(f'{avg_keep_pct = }')
             records.append({
                 'strategy':      strat,
-                'keep_pct':      1.0,
+                'keep_pct':  avg_keep_pct*100,
                 'accuracy':      gpp_acc,
                 'avg_time':      gpp_time
             })

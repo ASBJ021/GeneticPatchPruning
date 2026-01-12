@@ -23,7 +23,7 @@ from tqdm import tqdm
 from torchvision import transforms
 
 from gpp.dataset.data_utils import load_data_normal, build_dataloaders, PatchIndexDataset, _load_jsonl, split_dataset
-from gpp.model.model import PatchSelector, images_to_patches
+from gpp.model.model import PatchSelector, PatchSelectorWithSoftmax,images_to_patches, SimplePatchSelector, SimplePatchSelectorWithDropout, PatchSelectorResBlock
 from gpp.model.clip_model import forward_with_selected_patches, load_clip
 from gpp.utils.visual_utils import plot_heatmap_overlay 
 
@@ -54,6 +54,7 @@ seed = cfg["seed"]
 out_dir = cfg["res_dir"]
 out_dir = os.path.join(out_dir, f"{exp_name}_{int(time.time())}")
 # exp_name = cfg["exp_name"]
+mlp = cfg["mlp"]
 
 ckpt_path = cfg["model_checkpoint"]
 print(f'{ckpt_path = }')
@@ -124,6 +125,59 @@ def img_to_patch(img, selector, text_features, pixel_values, thresh=0.5):
     pred = ga_top1
     return ga_top1, selectd_idx
 
+
+
+
+def img_to_patch_with_sigmoid(img, selector, text_features, pixel_values, thresh=0.5):
+    
+    # pil_img = to_pil(img)
+    # pixel_values = processor(img).unsqueeze(0).to(device)
+    with torch.no_grad():
+        x = clip_model.visual.conv1(pixel_values)
+        B, D, H, W = x.shape
+        x = x.reshape(B, D, -1).permute(0, 2, 1)
+        # print(f'{x.shape = }')
+
+        cls_token = clip_model.visual.class_embedding.unsqueeze(0).expand(B, -1, -1)
+        tokens = torch.cat([cls_token, x], dim=1)
+        tokens += clip_model.visual.positional_embedding.unsqueeze(0)
+
+        tokens = clip_model.visual.ln_pre(tokens)
+        tokens = tokens.permute(1, 0, 2)
+        tokens = clip_model.visual.transformer(tokens)
+        tokens = tokens.permute(1, 0, 2)
+
+        orig_cls_token = tokens[:, 0, :]
+        orig_cls_token = clip_model.visual.ln_post(orig_cls_token)
+
+        if clip_model.visual.proj is not None:
+            orig_cls_token = orig_cls_token @ clip_model.visual.proj
+
+        orig_cls_token /= orig_cls_token.norm(dim=-1, keepdim=True)
+        patch_tokens = tokens[:, 1:, :]
+
+        preds = selector(patch_tokens).squeeze(-1) 
+
+        # print(f'{logits.shape = }')
+        # preds = (torch.sigmoid(logits) >= thresh).float()
+        # print(f'{preds = }')
+
+        thresh = 0.5
+        selectd_idx = torch.nonzero(preds[0] >= thresh).view(-1).tolist()
+
+        # selectd_idx  = torch.nonzero(preds[0], as_tuple=False).view(-1).tolist()
+        # print(f'{selectd_idx = }')
+
+        img_f_ga = forward_with_selected_patches(clip_model, device, x, selectd_idx)
+        probs_ga = (100 * img_f_ga @ text_features.T).softmax(-1)
+
+        # og_top1 = torch.argmax(probs_og, dim=-1).item()
+        ga_top1 = torch.argmax(probs_ga, dim=-1).item()
+        # og_top1_prob = probs_og[0, og_top1].item()
+        ga_top1_prob = probs_ga[0, ga_top1].item()
+
+    pred = ga_top1
+    return ga_top1, selectd_idx
 
 
 def topk_info(probs: torch.Tensor, labels: List[str], k: int = 5) -> List[Tuple[str, float]]:
@@ -220,7 +274,26 @@ def main():
     # ckpt = torch.load(ckpt_path)
     print(f'Evaluating on dataset: {dataset_name} | split: {data_split} ')
     print(f'Evaluating on number of samples: {num_samples}')
-    selector = PatchSelector().to(device).eval()
+
+    if mlp == "PatchSelector":
+        print(f'Training started using MLP: {mlp}')
+        selector = PatchSelector().to(device)
+    elif mlp == "PatchSelectorWithSoftmax":
+        print(f'Training started using MLP: {mlp}')
+        selector = PatchSelectorWithSoftmax().to(device)
+    elif mlp == "SimplePatchSelector":
+        print(f'Training started using MLP: {mlp}')
+        selector = SimplePatchSelector().to(device)
+    elif mlp == "SimplePatchSelectorWithDropout":
+        print(f'Training started using MLP: {mlp}')
+        selector = SimplePatchSelectorWithDropout().to(device)
+    elif mlp == "PatchSelectorResBlock":
+        print(f'Training started using MLP: {mlp}')
+        selector = PatchSelectorResBlock().to(device)
+    else: 
+        print(f"Please select an MLP in {cfg_path}")
+        return
+
     state = torch.load(ckpt_path, map_location=device)
     selector.load_state_dict(state.get("model_state_dict", state))
     selector.eval()
@@ -281,12 +354,13 @@ def main():
         count+=1
 
          # Save original image
-        img_path = os.path.join(images_dir, f"{id}_orig.jpg")
-        save_image_copy(img, img_path)
+        if vis:
+            img_path = os.path.join(images_dir, f"{id}_orig.jpg")
+            save_image_copy(img, img_path)
 
-        # Save heatmap overlay (selected patches = 1.0)
-        heatmap_path = os.path.join(images_dir, f"{id}_heatmap.png")
-        save_heatmap(img.copy(), selected, (H, W), heatmap_path, alpha=0.5)
+            # Save heatmap overlay (selected patches = 1.0)
+            heatmap_path = os.path.join(images_dir, f"{id}_heatmap.png")
+            save_heatmap(img.copy(), selected, (H, W), heatmap_path, alpha=0.5)
 
         # # Save boxes overlay
         # boxes_path = os.path.join(images_dir, f"{id}_boxes.png")

@@ -8,7 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import clip
 import yaml
-from timm.models.mlp_mixer import MixerBlock
+from timm.models.mlp_mixer import MixerBlock, ResBlock
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from torchvision import transforms
@@ -45,6 +45,7 @@ batch_size = cfg["batch_size"]
 seed = cfg["seed"]
 num_workers = cfg["num_workers"]
 epochs = cfg["epochs"]
+mlp = cfg["mlp"]
 
 model, processor = clip.load(model_id, device)  # Load on CPU initially
 model.float()  # Ensure model is in float32
@@ -60,8 +61,6 @@ class PatchSelector(nn.Module):
         )
         self.fc = nn.Linear(in_embed_dim, 1)
         
-
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x shape: (B, 3, H, W)
         # x: [B, 196, 768]
@@ -70,8 +69,124 @@ class PatchSelector(nn.Module):
         #x = self.fc(x)
         # x = x[:, 1:,:] # [B, 768]
         x = self.fc(x) # [B, 196, 1]
+        
+        return x
+
+class PatchSelectorWithSoftmax(nn.Module):
+    def __init__(self, in_embed_dim=768, out_embed_dim=196) -> None:
+        super().__init__()
+        self.adaptive_pool = nn.AdaptiveAvgPool1d(in_embed_dim)
+        #encoder_layer = nn.TransformerEncoderLayer(d_model=in_embed_dim, nhead=8)
+        #self.in_conv = nn.TransformerEncoder(encoder_layer, num_layers=2)
+        self.in_conv = nn.Sequential(
+            MixerBlock(in_embed_dim, 196)
+        )
+        self.fc = nn.Linear(in_embed_dim, 1)
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x shape: (B, 3, H, W)
+        # x: [B, 196, 768]
+        x = self.adaptive_pool(x)
+        x = self.in_conv(x)
+        #x = self.fc(x)
+        # x = x[:, 1:,:] # [B, 768]
+        x = self.fc(x) # [B, 196, 1]
+        x = F.sigmoid(x)
+        
+        return x
+
+class SimplePatchSelector(nn.Module):
+    def __init__(self, in_embed_dim=768, out_embed_dim=196) -> None:
+        super().__init__()
+        self.norm = nn.LayerNorm(in_embed_dim)
+        self.mlp = nn.Sequential(
+            nn.Linear(in_embed_dim, 512),
+            nn.GELU(),
+            nn.Linear(512, 196),
+            nn.GELU(),
+            nn.Linear(out_embed_dim, 1)
+        )
+        
+
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x shape: (B, 3, H, W)
+        # x: [B, 196, 768]
+        x = self.norm(x)
+        x = self.mlp(x)
+        #x = self.fc(x)
+        # x = x[:, 1:,:] # [B, 768]
+        return x
+
+class SimplePatchSelectorWithDropout(nn.Module):
+    def __init__(self, in_embed_dim=768, out_embed_dim=196) -> None:
+        super().__init__()
+        self.norm = nn.LayerNorm(in_embed_dim)
+        self.mlp = nn.Sequential(
+            nn.Linear(in_embed_dim, 512),
+            nn.GELU(),
+            nn.Dropout(0.1),
+            nn.Linear(512, 1024),
+            nn.GELU(),
+            nn.Dropout(0.1),
+            nn.Linear(1024, 512),
+            nn.GELU(),
+            nn.Dropout(0.1),
+            nn.Linear(512, out_embed_dim),
+            nn.GELU(),
+            nn.Dropout(0.1),
+            nn.Linear(out_embed_dim, 1)
+        )
+        
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x shape: (B, 3, H, W)
+        # x: [B, 196, 768]
+        x = self.norm(x)
+        x = self.mlp(x)
+        #x = self.fc(x)
+        # x = x[:, 1:,:] # [B, 768]
         return x
     
+class PatchSelectorResBlockWithAdaptivePool(nn.Module):
+    def __init__(self, in_embed_dim=768, out_embed_dim=196) -> None:
+        super().__init__()
+        self.adaptive_pool = nn.AdaptiveAvgPool1d(in_embed_dim)
+        self.in_conv = nn.Sequential(
+            ResBlock(in_embed_dim, out_embed_dim)
+        )
+        self.fc = nn.Linear(in_embed_dim, 1)
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x shape: (B, 3, H, W)
+        # x: [B, 196, 768]
+        x = self.adaptive_pool(x)
+        # print(f'After Adaptive Pool: {x.shape}')
+        x = self.in_conv(x)
+        # print(f'After ResBlock: {x.shape}')
+        x = self.fc(x)
+        # print(f'After FC: {x.shape}')
+        return x
+
+class PatchSelectorResBlock(nn.Module):
+    def __init__(self, in_embed_dim=768, out_embed_dim=196) -> None:
+        super().__init__()
+        # self.adaptive_pool = nn.AdaptiveAvgPool1d(in_embed_dim)
+        self.in_conv = nn.Sequential(
+            ResBlock(in_embed_dim, out_embed_dim)
+        )
+        self.fc = nn.Linear(in_embed_dim, 1)
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x shape: (B, 3, H, W)
+        # x: [B, 196, 768]
+        # x = self.adaptive_pool(x)
+        # print(f'After Adaptive Pool: {x.shape}')
+        x = self.in_conv(x)
+        # print(f'After ResBlock: {x.shape}')
+        x = self.fc(x)
+        # print(f'After FC: {x.shape}')
+        return x
 
 def images_to_patches(imgs):
     patches = []
@@ -142,7 +257,11 @@ def main():
         pin_memory=True,
     )
 
-    patch_selector = PatchSelector().to(device)
+    if mlp == "PatchSelector":
+        patch_selector = PatchSelector().to(device)
+    elif mlp == "SimplePatchSelector":
+        patch_selector = SimplePatchSelector().to(device)
+
     criterion = nn.BCEWithLogitsLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg["lr"])
 

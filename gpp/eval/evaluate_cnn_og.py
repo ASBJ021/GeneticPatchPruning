@@ -186,6 +186,9 @@ def main():
     probs_dir = os.path.join(args.out_dir, "probs")
     ensure_dir(probs_dir)
 
+    og_total_acc = 0
+    ga_total_acc = 0
+
     for idx in enumerate(dataset):
         # rec = ga_map[idx]
         # selected = rec.get("selected_indices", [])
@@ -220,23 +223,36 @@ def main():
         img_f_ga = forward_with_selected_patches(model, device, x, selected)
         probs_ga = (100 * img_f_ga @ text_features.T).softmax(-1)
 
+
+
         # Top-1 info
         og_top1 = torch.argmax(probs_og, dim=-1).item()
         ga_top1 = torch.argmax(probs_ga, dim=-1).item()
         og_top1_prob = probs_og[0, og_top1].item()
         ga_top1_prob = probs_ga[0, ga_top1].item()
 
-        # Save original image
-        img_path = os.path.join(images_dir, f"{idx:05d}_orig.jpg")
-        save_image_copy(img, img_path)
 
-        # Save heatmap overlay (selected patches = 1.0)
-        heatmap_path = os.path.join(images_dir, f"{idx:05d}_heatmap.png")
-        save_heatmap(img.copy(), selected, (H, W), heatmap_path, alpha=0.5)
+        if gt == og_top1:
+            # print(f'Correct Prediction for sample {id}: {gt = } & {pred = }')
+            og_total_acc+=1
+            # print(f'og_total_acc = {og_total_acc}')
+        if gt == ga_top1:
+            # print(f'GA Correct Prediction for sample {id}: {gt = } & {pred = }')
+            ga_total_acc+=1
+        count+=1
 
-        # Save boxes overlay
-        boxes_path = os.path.join(images_dir, f"{idx:05d}_boxes.png")
-        draw_boxes_on_image_with_preprocess(img.copy(), selected, model, processor, boxes_path)
+
+        # # Save original image
+        # img_path = os.path.join(images_dir, f"{idx:05d}_orig.jpg")
+        # save_image_copy(img, img_path)
+
+        # # Save heatmap overlay (selected patches = 1.0)
+        # heatmap_path = os.path.join(images_dir, f"{idx:05d}_heatmap.png")
+        # save_heatmap(img.copy(), selected, (H, W), heatmap_path, alpha=0.5)
+
+        # # Save boxes overlay
+        # boxes_path = os.path.join(images_dir, f"{idx:05d}_boxes.png")
+        # draw_boxes_on_image_with_preprocess(img.copy(), selected, model, processor, boxes_path)
 
         # Save per-image top-5 probabilities JSON
         top5_og = topk_info(probs_og, label_names, k=5)
@@ -275,6 +291,9 @@ def main():
     print(f"Saved images to: {images_dir}")
     print(f"Saved per-image probabilities to: {probs_dir}")
     print(f"Saved summary CSV to: {csv_path}")
+
+    print(f'Original CLIP Accuracy: {og_total_acc/count*100 :.2f} %')
+    print(f'GA-based Patch Selector CLIP Accuracy: {ga_total_acc/count*100 :.2f} %')
 
 
 if __name__ == "__main__":

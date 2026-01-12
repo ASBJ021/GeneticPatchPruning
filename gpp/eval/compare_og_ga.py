@@ -133,7 +133,7 @@ def save_heatmap(img: Image.Image, selected_idx: List[int], grid_hw: Tuple[int, 
     prev_interactive = plt.isinteractive()
     try:
         plt.ioff()
-        plot_heatmap_overlay(img, mask, (H, W), alpha=alpha)
+        # plot_heatmap_overlay(img, mask, (H, W), alpha=alpha)
         fig = plt.gcf()
         fig.savefig(save_path, bbox_inches="tight")
         plt.close(fig)
@@ -183,6 +183,10 @@ def main():
     probs_dir = os.path.join(args.out_dir, "probs")
     ensure_dir(probs_dir)
 
+    og_total_acc = 0
+    ga_total_acc = 0
+    count = 0
+
     for idx in ids:
         rec = ga_map[idx]
         selected = rec.get("selected_indices", [])
@@ -214,55 +218,68 @@ def main():
         og_top1_prob = probs_og[0, og_top1].item()
         ga_top1_prob = probs_ga[0, ga_top1].item()
 
-        # Save original image
-        img_path = os.path.join(images_dir, f"{idx:05d}_orig.jpg")
-        save_image_copy(img, img_path)
+        if gt == og_top1:
+            # print(f'Correct Prediction for sample {id}: {gt = } & {pred = }')
+            og_total_acc+=1
+            # print(f'og_total_acc = {og_total_acc}')
+        if gt == ga_top1:
+            # print(f'GA Correct Prediction for sample {id}: {gt = } & {pred = }')
+            ga_total_acc+=1
+        count+=1
 
-        # Save heatmap overlay (selected patches = 1.0)
-        heatmap_path = os.path.join(images_dir, f"{idx:05d}_heatmap.png")
-        save_heatmap(img.copy(), selected, (H, W), heatmap_path, alpha=0.5)
+
+        # Save original image
+        # img_path = os.path.join(images_dir, f"{idx:05d}_orig.jpg")
+        # save_image_copy(img, img_path)
+
+        # # Save heatmap overlay (selected patches = 1.0)
+        # heatmap_path = os.path.join(images_dir, f"{idx:05d}_heatmap.png")
+        # save_heatmap(img.copy(), selected, (H, W), heatmap_path, alpha=0.5)
 
         # Save boxes overlay
-        boxes_path = os.path.join(images_dir, f"{idx:05d}_boxes.png")
-        draw_boxes_on_image_with_preprocess(img.copy(), selected, model, processor, boxes_path)
+        # boxes_path = os.path.join(images_dir, f"{idx:05d}_boxes.png")
+        # draw_boxes_on_image_with_preprocess(img.copy(), selected, model, processor, boxes_path)
 
         # Save per-image top-5 probabilities JSON
         top5_og = topk_info(probs_og, label_names, k=5)
         top5_ga = topk_info(probs_ga, label_names, k=5)
-        with open(os.path.join(probs_dir, f"{idx:05d}.json"), "w", encoding="utf-8") as f:
-            json.dump({
-                "image_id": idx,
-                "gt": gt,
-                "og_top5": [(c, float(p)) for c, p in top5_og],
-                "ga_top5": [(c, float(p)) for c, p in top5_ga],
-                "og_top1": {"label": label_names[og_top1], "prob": float(og_top1_prob)},
-                "ga_top1": {"label": label_names[ga_top1], "prob": float(ga_top1_prob)},
-            }, f, indent=2)
+        # with open(os.path.join(probs_dir, f"{idx:05d}.json"), "w", encoding="utf-8") as f:
+        #     json.dump({
+        #         "image_id": idx,
+        #         "gt": gt,
+        #         "og_top5": [(c, float(p)) for c, p in top5_og],
+        #         "ga_top5": [(c, float(p)) for c, p in top5_ga],
+        #         "og_top1": {"label": label_names[og_top1], "prob": float(og_top1_prob)},
+        #         "ga_top1": {"label": label_names[ga_top1], "prob": float(ga_top1_prob)},
+        #     }, f, indent=2)
 
-        summary_rows.append({
-            "image_id": idx,
-            "gt": gt,
-            "og_top1": og_top1,
-            "og_top1_label": label_names[og_top1],
-            "og_top1_prob": og_top1_prob,
-            "ga_top1": ga_top1,
-            "ga_top1_label": label_names[ga_top1],
-            "ga_top1_prob": ga_top1_prob,
-            "selected_count": len(selected),
-        })
+        # summary_rows.append({
+        #     "image_id": idx,
+        #     "gt": gt,
+        #     "og_top1": og_top1,
+        #     "og_top1_label": label_names[og_top1],
+        #     "og_top1_prob": og_top1_prob,
+        #     "ga_top1": ga_top1,
+        #     "ga_top1_label": label_names[ga_top1],
+        #     "ga_top1_prob": ga_top1_prob,
+        #     "selected_count": len(selected),
+        # })
 
-    # Write summary CSV
-    import csv
-    csv_path = os.path.join(args.out_dir, "summary.csv")
-    if summary_rows:
-        with open(csv_path, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=list(summary_rows[0].keys()))
-            writer.writeheader()
-            writer.writerows(summary_rows)
+    # # Write summary CSV
+    # import csv
+    # csv_path = os.path.join(args.out_dir, "summary.csv")
+    # if summary_rows:
+    #     with open(csv_path, "w", newline="", encoding="utf-8") as f:
+    #         writer = csv.DictWriter(f, fieldnames=list(summary_rows[0].keys()))
+    #         writer.writeheader()
+    #         writer.writerows(summary_rows)
 
-    print(f"Saved images to: {images_dir}")
-    print(f"Saved per-image probabilities to: {probs_dir}")
-    print(f"Saved summary CSV to: {csv_path}")
+    # print(f"Saved images to: {images_dir}")
+    # print(f"Saved per-image probabilities to: {probs_dir}")
+    # print(f"Saved summary CSV to: {csv_path}")
+
+    print(f'Original CLIP Accuracy: {og_total_acc/count*100 :.2f} %')
+    print(f'GA-based Patch Selector CLIP Accuracy: {ga_total_acc/count*100 :.2f} %')
 
 
 if __name__ == "__main__":

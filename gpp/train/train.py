@@ -2,6 +2,8 @@ from typing import List, Tuple, Optional
 import os
 import sys
 from pathlib import Path
+import shutil
+from datetime import datetime
 
 # Ensure project root is available on sys.path when running the script directly
 ROOT = Path(__file__).resolve().parents[2]
@@ -18,8 +20,8 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from torchvision import transforms
 
-from gpp.dataset.data_utils import load_data_normal, build_dataloaders, PatchIndexDataset, _load_jsonl, split_dataset
-from gpp.model.model import PatchSelector, images_to_patches
+from gpp.dataset.data_utils import load_data_normal, build_dataloaders, PatchIndexDataset, _load_jsonl, split_dataset, load_data_folder
+from gpp.model.model import PatchSelector, PatchSelectorWithSoftmax, images_to_patches, SimplePatchSelector, SimplePatchSelectorWithDropout, PatchSelectorResBlock
 
 
 cfg_path = '/var/lit2425/jenga/GeneticPatchPruning/config/training_config.yaml'
@@ -37,7 +39,10 @@ to_pil = transforms.ToPILImage()
 
 num_samples  = cfg["num_samples"]
 dataset_name = cfg["dataset_name"]
+data_dir = cfg["data_dir"]
+use_local_data = cfg["use_local_data"]
 data_split = cfg["split"]
+cache_dir = cfg["cache_dir"]
 model_id     = cfg["model_id"]
 vis = cfg["visualize"]
 annotation_path = cfg["annotation_path"]
@@ -48,22 +53,40 @@ num_workers = cfg["num_workers"]
 epochs = cfg["epochs"]
 save_dir = cfg["save_dir"]
 exp_name = cfg["exp_name"]
+mlp = cfg['mlp']
 
 save_dir = f'{save_dir}/{exp_name}'
 print(f'{save_dir = }')
 
 Path(save_dir).mkdir(parents=True, exist_ok=True)
 
-
+config_save_path = os.path.join(save_dir, "training_config.yaml")
+shutil.copy(cfg_path, config_save_path)
 
 model, processor = clip.load(model_id, device)  # Load on CPU initially
 model.float()  # Ensure model is in float32
 
 def accuracy_at_threshold(logits: torch.Tensor, targets: torch.Tensor, thresh: float = 0.5) -> float:
     """Simple multi-label accuracy: fraction of correctly predicted bits over all bits."""
+    # print(len(logits), len(targets))
     with torch.no_grad():
         preds = (torch.sigmoid(logits) >= thresh).float()
         correct = (preds == targets).float().mean().item()
+    return correct
+
+def accuracy_at_threshold_with_probs(
+    probs: torch.Tensor,
+    targets: torch.Tensor,
+    thresh: float = 0.5
+) -> float:
+    """
+    probs: model outputs AFTER sigmoid, shape [B, ..., 1] or [B, ...]
+    targets: binary targets in {0,1}, same shape
+    """
+    with torch.no_grad():
+        preds = (probs >= thresh).float()
+        correct = (preds == targets).float().mean().item()
+    # print(f'{correct = }')
     return correct
 
 
@@ -72,7 +95,12 @@ def main():
     # load dataset
     print(f'{dataset_name = }')
     print(f'{num_samples = }')
-    ds, _ = load_data_normal(dataset_name, num_samples, data_split)
+
+    if use_local_data:
+        print(f'loading data from: {data_dir}')
+        ds, _ = load_data_folder(data_dir, num_samples, SPLIT=data_split, cache_dir=cache_dir)
+    else:
+        ds, _ = load_data_normal(dataset_name, num_samples, data_split)
     # print(ds)
 
     full_dataset = PatchIndexDataset(ds=ds, jsonl_path=annotation_path, img_size=img_size)
@@ -105,9 +133,77 @@ def main():
         pin_memory=True,
     )
 
-    patch_selector = PatchSelector().to(device)
-    criterion = nn.BCEWithLogitsLoss()
-    optimizer = torch.optim.Adam(patch_selector.parameters(), lr=cfg["lr"])
+    if mlp == "PatchSelector":
+        print(f'Training started using MLP: {mlp}')
+        patch_selector = PatchSelector().to(device)
+    elif mlp == "PatchSelectorWithSoftmax":
+        print(f'Training started using MLP: {mlp}')
+        patch_selector = PatchSelectorWithSoftmax().to(device)
+    elif mlp == "SimplePatchSelector":
+        print(f'Training started using MLP: {mlp}')
+        patch_selector = SimplePatchSelector().to(device)
+    elif mlp == "SimplePatchSelectorWithDropout":
+        print(f'Training started using MLP: {mlp}')
+        patch_selector = SimplePatchSelectorWithDropout().to(device)
+    elif mlp == "PatchSelectorResBlock":
+        print(f'Training started using MLP: {mlp}')
+        patch_selector = PatchSelectorResBlock().to(device)
+    else: 
+        print(f"Please select an MLP in {cfg_path}")
+
+    # criterion = nn.BCEWithLogitsLoss()
+    criterion = nn.BCELoss()
+    # optimizer = torch.optim.Adam(patch_selector.parameters(), lr=cfg["lr"])
+    optimizer = torch.optim.AdamW(patch_selector.parameters(), lr=cfg["lr"])
+
+
+    run_metadata = {
+        "timestamp": datetime.now().isoformat(),
+
+        # Config + experiment
+        "cfg_path": cfg_path,
+        "save_dir": save_dir,
+        "exp_name": exp_name,
+        "dataset_name": dataset_name,
+        "num_samples": num_samples,
+        "split": data_split,
+        "seed": seed,
+
+        # Model info
+        "model_class": patch_selector.__class__.__name__,
+        "model_module": patch_selector.__class__.__module__,
+        "num_model_params": int(sum(p.numel() for p in patch_selector.parameters())),
+        "num_classes": int(num_classes),
+
+        # Loss info
+        "loss_function": criterion.__class__.__name__,
+        "loss_params": {
+            "pos_weight": (
+                criterion.pos_weight.detach().cpu().tolist()
+                if getattr(criterion, "pos_weight", None) is not None
+                else None
+            )
+        },
+
+        # Optimizer info
+        "optimizer": optimizer.__class__.__name__,
+        "optimizer_params": dict(optimizer.defaults),  # lr, betas, eps, weight_decay, etc.
+
+        # Training setup
+        "epochs": int(epochs),
+        "batch_size": int(batch_size),
+        "num_workers": int(num_workers),
+        "device": device,
+        "clip_model_id": model_id,
+
+        
+    }
+
+    metadata_path = os.path.join(save_dir, "run_metadata.yaml")
+    with open(metadata_path, "w") as f:
+        yaml.safe_dump(run_metadata, f, sort_keys=False)
+    print(f"Saved run metadata to {metadata_path}")
+
 
     best_val_loss: Optional[float] = None
     metrics_path = os.path.join(save_dir, "metrics.jsonl")
@@ -141,9 +237,11 @@ def main():
             # print(patches[0].shape)
 
             logits = patch_selector(patches).squeeze(-1) 
+            
             # print(logits.shape)
 
             loss = criterion(logits, targets)
+
             # print(loss)
 
             optimizer.zero_grad(set_to_none=True)
@@ -152,7 +250,8 @@ def main():
             optimizer.step()
 
             total_loss += loss.item()
-            total_acc += accuracy_at_threshold(logits.detach(), targets)
+            # total_acc += accuracy_at_threshold(logits.detach(), targets)
+            total_acc += accuracy_at_threshold_with_probs(logits, targets)
             steps += 1
             # print(f'{total_loss = }')
             # break
@@ -207,13 +306,25 @@ def main():
         print(f"Epoch {epoch}/{epochs} Train Loss: {avg_loss:.4f} Bit Acc@0.5: {avg_acc:.4f}")
         print(f"Epoch {epoch}/{epochs} Val   Loss: {avg_val_loss:.4f} Bit Acc@0.5: {avg_val_acc:.4f}")
 
+        # checkpoint = {
+        #     "epoch": epoch,
+        #     "model_state_dict": patch_selector.state_dict(),
+        #     "optimizer_state_dict": optimizer.state_dict(),
+        #     "train_loss": avg_loss,
+        #     "val_loss": avg_val_loss,
+        # }
+
         checkpoint = {
             "epoch": epoch,
             "model_state_dict": patch_selector.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
+            "optimizer_class": optimizer.__class__.__name__,
+            "optimizer_defaults": dict(optimizer.defaults),
+            "loss_function": criterion.__class__.__name__,
             "train_loss": avg_loss,
             "val_loss": avg_val_loss,
         }
+
         ckpt_path = os.path.join(save_dir, f"checkpoint_epoch_{epoch:03d}.pt")
         torch.save(checkpoint, ckpt_path)
 
