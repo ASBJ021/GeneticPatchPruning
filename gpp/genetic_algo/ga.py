@@ -1,6 +1,6 @@
 import random
 import numpy as np
-from typing import List, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .scoring import fitness_function_from_tokens
 
@@ -16,6 +16,7 @@ def genetic_algorithm(
     population_size: int = 20,
     generations: int = 30,
     mutation_rate: float = 0.1,
+    step_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> List[int]:
     """Simple GA for selecting a fixed-size subset of patch indices to keep.
 
@@ -29,12 +30,26 @@ def genetic_algorithm(
         # convert kept indices to indices-to-remove
         kept_set = set(kept_idx)
         indices_to_remove = [i for i in range(num_patches) if i not in kept_set]
-        return fitness_function_from_tokens(
+        base, _, _ = fitness_function_from_tokens(
             model, device, x_tokens, indices_to_remove, text_features, original_cls
         )
+        return base
 
-    for _ in range(generations):
+    for generation in range(generations):
         scores = [score_kept(ind) for ind in population]
+        if step_callback is not None:
+            best_idx = int(np.argmax(scores)) if scores else 0
+            best_kept = population[best_idx] if population else []
+            step_callback(
+                {
+                    "generation": int(generation),
+                    "best_score": float(scores[best_idx]) if scores else 0.0,
+                    "avg_score": float(np.mean(scores)) if scores else 0.0,
+                    "best_keep_count": int(len(best_kept)),
+                    "best_kept_indices": [int(i) for i in best_kept],
+                    "population_size": int(population_size),
+                }
+            )
         total = sum(scores) or 1.0
         probs = [s / total for s in scores]
 
@@ -61,12 +76,24 @@ def genetic_algorithm(
         population = next_gen
 
     best = max(population, key=score_kept)
+    if step_callback is not None:
+        best_score = score_kept(best)
+        step_callback(
+            {
+                "generation": int(generations),
+                "best_score": float(best_score),
+                "avg_score": float(best_score),
+                "best_keep_count": int(len(best)),
+                "best_kept_indices": [int(i) for i in best],
+                "population_size": int(population_size),
+                "event": "final_best",
+            }
+        )
     return best
 
 
 def _repair_bits(bits, min_keep: int, max_keep: int):
     """Ensure number of ones lies within [min_keep, max_keep] by flipping bits."""
-    import random
 
     ones_idx = [i for i, b in enumerate(bits) if b == 1]
     zeros_idx = [i for i, b in enumerate(bits) if b == 0]
@@ -103,6 +130,7 @@ def genetic_algorithm_variable_keep(
     mutation_rate: float = 0.1,
     bit_flip_rate: float = 0.05,
     keep_penalty: float = 0.1,
+    step_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> Tuple[List[int], float]:
     """GA over a binary chromosome (length=num_patches) to choose which patches to keep.
 
@@ -111,17 +139,17 @@ def genetic_algorithm_variable_keep(
     - Repair ensures kept count stays within [min_keep, max_keep].
     Returns list of kept indices.
     """
-    import random
 
-    def score_bits(bits):
+    def score_bits(bits, save_fitness_scores=False) -> float:
         kept = sum(bits)
         # indices to remove are zeros
         indices_to_remove = [i for i, b in enumerate(bits) if b == 0]
-        base = fitness_function_from_tokens(
+        base, _, _ = fitness_function_from_tokens(
             model, device, x_tokens, indices_to_remove, text_features, original_cls
         )
         penalty = keep_penalty * (kept / num_patches)
-        return max(0,base - penalty)
+
+        return max(0, base - penalty)
 
     # Initialize population with random feasible bitstrings within [min_keep, max_keep]
     population = []
@@ -134,8 +162,22 @@ def genetic_algorithm_variable_keep(
         bits = _repair_bits(bits, min_keep, max_keep)
         population.append(bits)
 
-    for _ in range(generations):
+    for generation in range(generations):
         scores = [score_bits(bits) for bits in population]
+        if step_callback is not None:
+            best_idx = int(np.argmax(scores)) if scores else 0
+            best_bits = population[best_idx] if population else []
+            best_kept = _bits_to_indices(best_bits)
+            step_callback(
+                {
+                    "generation": int(generation),
+                    "best_score": float(scores[best_idx]) if scores else 0.0,
+                    "avg_score": float(np.mean(scores)) if scores else 0.0,
+                    "best_keep_count": int(len(best_kept)),
+                    "best_kept_indices": [int(i) for i in best_kept],
+                    "population_size": int(population_size),
+                }
+            )
         total = sum(scores) or 1.0
         probs = [s / total for s in scores]
 
@@ -165,6 +207,19 @@ def genetic_algorithm_variable_keep(
 
     best = max(population, key=lambda bits: score_bits(bits))
     indices = _bits_to_indices(best)
+    if step_callback is not None:
+        best_score = score_bits(best)
+        step_callback(
+            {
+                "generation": int(generations),
+                "best_score": float(best_score),
+                "avg_score": float(best_score),
+                "best_keep_count": int(len(indices)),
+                "best_kept_indices": [int(i) for i in indices],
+                "population_size": int(population_size),
+                "event": "final_best",
+            }
+        )
     keep_pct = (len(indices) / num_patches) if num_patches > 0 else 0.0
     keep_pct = round(keep_pct, 2)
     return indices, keep_pct

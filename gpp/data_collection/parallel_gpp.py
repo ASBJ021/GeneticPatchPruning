@@ -48,6 +48,7 @@ optimize_keep = cfg.get("optimize_keep", False)
 min_keep_pct = cfg.get("min_keep_pct", 0.1)
 max_keep_pct = cfg.get("max_keep_pct", 0.9)
 keep_penalty = cfg.get("keep_penalty", 0.1)
+ga_visualization = cfg.get("ga_visualization", False)
 # ml_model = cfg["model_checkpoint"]
 # ─── Load Model ──────────────────────────────────────────────────────
 model_id = cfg["model_id"] # clip model id
@@ -161,6 +162,7 @@ def main():
         max_keep_pct=max_keep_pct,
         keep_penalty=keep_penalty,
         base_idx=start,
+        ga_visualization=ga_visualization,
     )
 
 
@@ -172,4 +174,3 @@ def main():
 # ─── Entry Point ─────────────────────────────────────────────────────
 if __name__ == "__main__":
     main()
-

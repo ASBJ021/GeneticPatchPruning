@@ -22,7 +22,7 @@ def normalize_pct(value: Optional[str]) -> Optional[float]:
     return pct * 100 if pct <= 1 else pct
 
 def main():
-    csv_path = "/home/utn/firi22ka/Desktop/jenga/GeneticPatchPruning/compare_0_0.3_full/summary.csv"
+    csv_path = "compare_0_0.5_full/summary.csv"
     res_path = Path(csv_path)
     records = []
     # keep_pct = []
@@ -69,8 +69,12 @@ def main():
     for row in records:
         if row.get("gt") == row.get("og_top1"):
             og_avg_acc += 1.0
+        
         if row.get("gt") == row.get("ga_top1"):
             ga_avg_acc += 1.0   
+        else:
+            print(f"Mismatch ids: {row.get('image_id')} ")
+
     og_avg_acc /= len(records)
     ga_avg_acc /= len(records)
 

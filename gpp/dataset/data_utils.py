@@ -61,7 +61,7 @@ def load_data_folder(DATA_DIR, NUM_SAMPLES, SPLIT="validation", cache_dir= "/hom
 
     print(ds[0])
 
-    names = ds.features["label"].names
+    names = ds.features["label"].names 
     prompts = [f"a photo of a {n.replace('_',' ')}" for n in names]
 
 
@@ -129,7 +129,10 @@ def load_data_normal(DATASET_NAME, NUM_SAMPLES, SPLIT="test"):
     if NUM_SAMPLES > 0:
         ds = ds.select(range(NUM_SAMPLES))
     print(ds[0])
-    names = ds.features["label"].names
+    if "fine_label" in ds.features:
+        names = ds.features["fine_label"].names
+    elif "label" in ds.features: 
+        names = ds.features["label"].names
     prompts = [f"a photo of a {n.replace('_',' ')}" for n in names]
     return ds, prompts
 

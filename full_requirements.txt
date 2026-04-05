@@ -1,0 +1,32 @@
+# Core ML stack
+torch>=1.8.1
+torchvision>=0.8.9
+numpy
+tqdm>=2
+PyYAML
+Pillow
+matplotlib
+pandas
+scikit-learn>=1.0,<2
+timm>=0.5.4
+beautifultable
+
+# Hugging Face / CLIP tooling
+datasets
+transformers
+open_clip_torch>=0.2.1
+git+https://github.com/openai/CLIP.git
+
+# Benchmark / evaluation utilities
+webdataset>=0.2.31
+pycocoevalcap
+pycocotools>=2.0.4
+requests
+
+# Optional dataset backends used by some CLIP_benchmark loaders
+tensorflow
+tensorflow-datasets
+task_adaptation==0.1
+
+# Test dependency
+pytest

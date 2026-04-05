@@ -14,9 +14,6 @@ import torch.nn.functional as F
 import yaml
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-import argparse
-
-
 
 # Ensure project root is available on sys.path when running the script directly
 ROOT = Path(__file__).resolve().parents[2]
@@ -32,7 +29,6 @@ from gpp.model.model import (
     SimplePatchSelector,
     SimplePatchSelectorWithDropout,
 )
-from gpp.train.ga_distill_train import resolve_config_placeholders
 
 
 def log_message(message: str, log_path: Optional[str] = None) -> None:
@@ -43,8 +39,70 @@ def log_message(message: str, log_path: Optional[str] = None) -> None:
             log_file.write(timestamped_message + "\n")
 
 
+cfg_path = "/var/lit2425/jenga/GeneticPatchPruning/config/training_config.yaml"
+log_message(f"Loading config from {cfg_path}")
+
+with open(cfg_path, "r", encoding="utf-8") as f:
+    cfg = yaml.safe_load(f)
+
+device = cfg.get("device", "cuda")
+if not torch.cuda.is_available():
+    device = "cpu"
+
 CLIP_MEAN = (0.48145466, 0.45782750, 0.40821073)
 CLIP_STD = (0.26862954, 0.26130258, 0.27577711)
+
+num_samples = cfg["num_samples"]
+dataset_name = cfg["dataset_name"]
+data_dir = cfg["data_dir"]
+use_local_data = cfg["use_local_data"]
+data_split = cfg["split"]
+cache_dir = cfg["cache_dir"]
+model_id = cfg["model_id"]
+annotation_path = cfg["annotation_path"]
+img_size = cfg["img_size"]
+batch_size = cfg["batch_size"]
+seed = cfg["seed"]
+num_workers = cfg["num_workers"]
+epochs = cfg["epochs"]
+save_dir = cfg["save_dir"]
+exp_name = cfg["exp_name"]
+mlp = cfg["mlp"]
+keep_penalty = cfg["keep_penalty"]
+resume_training = bool(cfg.get("resume_training", False))
+resume_checkpoint_path = cfg.get("resume_checkpoint_path")
+resume_load_optimizer = bool(cfg.get("resume_load_optimizer", True))
+selection_threshold = float(cfg.get("selection_threshold", 0.5))
+min_keep_tokens = int(cfg.get("min_keep_tokens", 1))
+weight_decay = float(cfg.get("weight_decay", 0.01))
+selector_dropout = float(cfg.get("selector_dropout", 0.1))
+lr_scheduler_cfg = cfg.get("lr_scheduler", {"name": "none"})
+if isinstance(lr_scheduler_cfg, str):
+    lr_scheduler_cfg = {"name": lr_scheduler_cfg}
+
+weights_cfg = cfg.get("weights", {})
+fitness_weight = float(weights_cfg.get("fitness_loss", 1.0))
+bce_loss_weight = float(weights_cfg.get("bce_loss", 1.0))
+fitness_conf_weight = float(weights_cfg.get("conf", 0.4))
+fitness_feat_weight = float(weights_cfg.get("feat", 0.6))
+fitness_log_interval = int(cfg.get("fitness_log_interval", 50))
+log_val_fitness_loss = bool(cfg.get("log_val_fitness_loss", True))
+
+save_dir = f"{save_dir}/{exp_name}"
+Path(save_dir).mkdir(parents=True, exist_ok=True)
+training_log_path = os.path.join(save_dir, "training_log.txt")
+log_mode = "a" if resume_training and os.path.exists(training_log_path) else "w"
+with open(training_log_path, log_mode, encoding="utf-8"):
+    pass
+if log_mode == "a":
+    log_message("-" * 80, training_log_path)
+    log_message("Resuming training run (appending logs)", training_log_path)
+
+log_message(f"{save_dir = }", training_log_path)
+log_message(f"Training logs will be saved to: {training_log_path}", training_log_path)
+
+config_save_path = os.path.join(save_dir, "training_config.yaml")
+shutil.copy(cfg_path, config_save_path)
 
 
 def accuracy_at_threshold_with_probs(
@@ -56,6 +114,50 @@ def accuracy_at_threshold_with_probs(
         preds = (probs >= thresh).float()
         correct = (preds == targets).float().mean().item()
     return correct
+
+
+def hard_selection_mask_from_probs(
+    probs: torch.Tensor,
+    thresh: float,
+    min_keep_tokens_value: int,
+) -> torch.Tensor:
+    """Convert patch probabilities to a hard selection mask with a minimum keep floor."""
+    hard = probs >= thresh
+    if min_keep_tokens_value <= 0:
+        return hard
+
+    n_tokens = int(probs.size(1))
+    min_keep = max(1, min(min_keep_tokens_value, n_tokens))
+    kept = hard.sum(dim=1)
+    need_fix = kept < min_keep
+    if need_fix.any():
+        fix_idx = torch.topk(probs[need_fix], k=min_keep, dim=1).indices
+        fixed = torch.zeros_like(hard[need_fix], dtype=torch.bool)
+        fixed.scatter_(1, fix_idx, True)
+        hard[need_fix] = fixed
+    return hard
+
+
+def init_keep_tracker() -> dict:
+    return {"sum": 0.0, "sum_sq": 0.0, "count": 0, "min": 1.0, "max": 0.0}
+
+
+def update_keep_tracker(tracker: dict, hard_mask: torch.Tensor) -> None:
+    keep_ratios = hard_mask.float().mean(dim=1)
+    tracker["sum"] += keep_ratios.sum().item()
+    tracker["sum_sq"] += (keep_ratios * keep_ratios).sum().item()
+    tracker["count"] += int(keep_ratios.numel())
+    tracker["min"] = min(tracker["min"], float(keep_ratios.min().item()))
+    tracker["max"] = max(tracker["max"], float(keep_ratios.max().item()))
+
+
+def finalize_keep_tracker(tracker: dict) -> tuple[float, float, float, float]:
+    c = max(1, int(tracker["count"]))
+    mean = tracker["sum"] / c
+    mean_sq = tracker["sum_sq"] / c
+    var = max(0.0, mean_sq - mean * mean)
+    std = var ** 0.5
+    return mean, std, float(tracker["min"]), float(tracker["max"])
 
 
 def _clip_preprocess_batch(
@@ -160,37 +262,16 @@ def differentiable_fitness_loss(
     return fitness_loss, stats
 
 
-def dice_set_loss(probs: torch.Tensor, targets: torch.Tensor, smooth: float = 1e-6) -> torch.Tensor:
-    inter = (probs * targets).sum(dim=1)
-    denom = probs.sum(dim=1) + targets.sum(dim=1)
-    dice = (2.0 * inter + smooth) / (denom + smooth)
-    return (1.0 - dice).mean()
-
-
-def count_match_loss(
-    probs: torch.Tensor,
-    targets: torch.Tensor,
-    normalize_by_tokens: bool = True,
-) -> torch.Tensor:
-    pred_count = probs.sum(dim=1)
-    tgt_count = targets.sum(dim=1)
-    abs_diff = (pred_count - tgt_count).abs()
-    if normalize_by_tokens:
-        abs_diff = abs_diff / float(max(1, probs.size(1)))
-    return abs_diff.mean()
-
-
 def build_selector(
     selector_name: str,
     selector_device: str,
     dropout_rate: float = 0.1,
-    mixer_mlp_ratio: Optional[tuple[float, float]] = (0.5, 4.0),
 ) -> tuple[nn.Module, nn.Module, bool]:
     outputs_are_probs = False
     criterion: nn.Module = nn.BCEWithLogitsLoss()
 
     if selector_name == "PatchSelector":
-        selector = PatchSelector(mixer_mlp_ratio=mixer_mlp_ratio).to(selector_device)
+        selector = PatchSelector().to(selector_device)
     elif selector_name == "PatchSelectorWithSoftmax":
         selector = PatchSelectorWithSoftmax().to(selector_device)
         criterion = nn.BCELoss()
@@ -298,93 +379,9 @@ def build_lr_scheduler(
 
 
 def main() -> None:
-
-    parser = argparse.ArgumentParser(description="Train patch selector with BCE + optional dice/count/fitness losses.")
-    parser.add_argument("--config", type=str, default=str(ROOT / "config" / "training_config.yaml"))
-    args = parser.parse_args()
-
-    
-
-    with open(args.config, "r", encoding="utf-8") as f:
-        cfg = yaml.safe_load(f)
-    cfg = resolve_config_placeholders(cfg)
-
-    device = cfg.get("device", "cuda")
-    if not torch.cuda.is_available():
-        device = "cpu"
-
-    num_samples = int(cfg["num_samples"])
-    dataset_name = cfg["dataset_name"]
-    data_dir = cfg["data_dir"]
-    use_local_data = bool(cfg["use_local_data"])
-    data_split = cfg["split"]
-    cache_dir = cfg["cache_dir"]
-    model_id = cfg["model_id"]
-    annotation_path = cfg["annotation_path"]
-    img_size = int(cfg["img_size"])
-    batch_size = int(cfg["batch_size"])
-    seed = int(cfg["seed"])
-    num_workers = int(cfg["num_workers"])
-    epochs = int(cfg["epochs"])
-    save_dir = str(cfg["save_dir"])
-    exp_name = str(cfg["exp_name"])
-    mlp = str(cfg["mlp"])
-    mixer_mlp_ratio = cfg["mixer_mlp_ratio"]
-    keep_penalty = float(cfg.get("keep_penalty", 0.0))
-    resume_training = bool(cfg.get("resume_training", False))
-    resume_checkpoint_path = str(cfg.get("resume_checkpoint_path", ""))
-    resume_load_optimizer = bool(cfg.get("resume_load_optimizer", True))
-
-    selection_cfg = cfg.get("selection", {})
-    min_keep_tokens = int(selection_cfg.get("min_keep_tokens", cfg.get("min_keep_tokens", 1)))
-    max_keep_tokens = int(selection_cfg.get("max_keep_tokens", cfg.get("max_keep_tokens", 0)))
-
-    weight_decay = float(cfg.get("weight_decay", 0.01))
-    selector_dropout = float(cfg.get("selector_dropout", 0.1))
-    lr_scheduler_cfg = cfg.get("lr_scheduler", {"name": "none"})
-    if isinstance(lr_scheduler_cfg, str):
-        lr_scheduler_cfg = {"name": lr_scheduler_cfg}
-
-    weights_cfg = cfg.get("weights", {})
-    bce_loss_weight = float(weights_cfg.get("bce_loss", 1.0))
-    dice_loss_weight = float(weights_cfg.get("dice_loss", 1.0))
-    count_loss_weight = float(weights_cfg.get("count_loss", 1.0))
-    fitness_loss_weight = float(weights_cfg.get("fitness_loss", 0.0))
-    fitness_conf_weight = float(weights_cfg.get("conf", 0.4))
-    fitness_feat_weight = float(weights_cfg.get("feat", 0.6))
-    fitness_log_interval = int(cfg.get("fitness_log_interval", 50))
-
-    save_dir = f"{save_dir}/{exp_name}"
-    Path(save_dir).mkdir(parents=True, exist_ok=True)
-    training_log_path = os.path.join(save_dir, "training_log.txt")
-    log_mode = "a" if resume_training and os.path.exists(training_log_path) else "w"
-
-    
-
-    with open(training_log_path, log_mode, encoding="utf-8"):
-        pass
-
-    cfg_out_path = os.path.join(save_dir, "training_config.yaml")
-    shutil.copy(args.config, cfg_out_path)
-
-    
-
-    log_message(f"Loading config from {args.config}", training_log_path)
-    log_message(f"save_dir={save_dir}", training_log_path)
-    log_message(
-        f"Loss weights: bce={bce_loss_weight}, dice={dice_loss_weight}, count={count_loss_weight}, fit={fitness_loss_weight}",
-        training_log_path,
-    )
-    log_message(
-        f"Selection mode: adaptive_topk, min_keep_tokens={min_keep_tokens}, max_keep_tokens={max_keep_tokens}",
-        training_log_path,
-    )
-
     log_message("Starting training run", training_log_path)
     log_message(f"{dataset_name = }", training_log_path)
     log_message(f"{num_samples = }", training_log_path)
-
-    
 
     if use_local_data:
         log_message(f"loading data from: {data_dir}", training_log_path)
@@ -427,7 +424,7 @@ def main() -> None:
         pin_memory=True,
     )
 
-    patch_selector, criterion, outputs_are_probs = build_selector(mlp, device, selector_dropout, mixer_mlp_ratio)
+    patch_selector, criterion, outputs_are_probs = build_selector(mlp, device, selector_dropout)
     log_message(f"Training started using MLP: {mlp}", training_log_path)
 
     optimizer = torch.optim.AdamW(
@@ -441,111 +438,105 @@ def main() -> None:
     else:
         log_message(f"LR scheduler: {scheduler.__class__.__name__}", training_log_path)
     start_epoch = 1
-    best_specs = {
-        "total": ("val_total_loss", "checkpoint_best_total.pt"),
-        "cls": ("val_cls_loss", "checkpoint_best_cls.pt"),
-        "bce": ("val_bce_loss", "checkpoint_best_bce.pt"),
-        "dice": ("val_dice_loss", "checkpoint_best_dice.pt"),
-        "count": ("val_count_loss", "checkpoint_best_count.pt"),
-        "fitness": ("val_fitness_loss", "checkpoint_best_fitness.pt"),
-    }
-    best_metrics = {name: None for name in best_specs}
-    for name, (metric_key, filename) in best_specs.items():
-        best_metrics[name] = load_metric_from_checkpoint(os.path.join(save_dir, filename), metric_key)
+    resumed_from: Optional[str] = None
+    resumed_checkpoint: Optional[dict] = None
 
     if resume_training:
-        resume_path = resolve_resume_checkpoint(save_dir, resume_checkpoint_path)
-        if resume_path is None or not os.path.exists(resume_path):
-            raise FileNotFoundError(f"Resume requested but checkpoint not found: {resume_path}")
+        resolved_resume_path = resolve_resume_checkpoint(save_dir, resume_checkpoint_path)
+        if resolved_resume_path is None or not os.path.exists(resolved_resume_path):
+            raise FileNotFoundError(
+                f"Resume requested but checkpoint was not found. "
+                f"Requested: {resume_checkpoint_path}, search_dir: {save_dir}"
+            )
+        resumed_from = resolved_resume_path
+        resumed_checkpoint = torch.load(resolved_resume_path, map_location=device)
+        patch_selector.load_state_dict(resumed_checkpoint["model_state_dict"])
 
-        resumed_ckpt = torch.load(resume_path, map_location=device)
-        patch_selector.load_state_dict(resumed_ckpt["model_state_dict"])
-        if resume_load_optimizer and "optimizer_state_dict" in resumed_ckpt:
-            optimizer.load_state_dict(resumed_ckpt["optimizer_state_dict"])
-            if scheduler is not None and "scheduler_state_dict" in resumed_ckpt:
-                scheduler.load_state_dict(resumed_ckpt["scheduler_state_dict"])
-        start_epoch = int(resumed_ckpt.get("epoch", 0)) + 1
+        if resume_load_optimizer and "optimizer_state_dict" in resumed_checkpoint:
+            optimizer.load_state_dict(resumed_checkpoint["optimizer_state_dict"])
+            move_optimizer_state_to_device(optimizer, device)
+            log_message("Loaded optimizer state from resume checkpoint", training_log_path)
+            if scheduler is not None and "scheduler_state_dict" in resumed_checkpoint:
+                scheduler.load_state_dict(resumed_checkpoint["scheduler_state_dict"])
+                log_message("Loaded scheduler state from resume checkpoint", training_log_path)
+        else:
+            log_message("Resume without optimizer state (optimizer reinitialized)", training_log_path)
 
-        resume_best_keys = {
-            "total": "best_val_total_loss",
-            "cls": "best_val_cls_loss",
-            "bce": "best_val_bce_loss",
-            "dice": "best_val_dice_loss",
-            "count": "best_val_count_loss",
-            "fitness": "best_val_fitness_loss",
-        }
-        for name, key in resume_best_keys.items():
-            if best_metrics[name] is None and resumed_ckpt.get(key) is not None:
-                best_metrics[name] = float(resumed_ckpt[key])
-        # backward-compatible fallback when bce key wasn't stored
-        if best_metrics["bce"] is None and resumed_ckpt.get("val_cls_loss") is not None:
-            best_metrics["bce"] = float(resumed_ckpt["val_cls_loss"])
-        log_message(f"Resumed from {resume_path} at epoch {start_epoch}", training_log_path)
+        last_epoch = int(resumed_checkpoint.get("epoch", 0))
+        start_epoch = last_epoch + 1
+        log_message(
+            f"Resumed model from {resumed_from} (last_epoch={last_epoch}, start_epoch={start_epoch})",
+            training_log_path,
+        )
 
-    log_message(
-        (
-            "Initial best losses: "
-            f"total={best_metrics['total']}, "
-            f"cls={best_metrics['cls']}, "
-            f"bce={best_metrics['bce']}, "
-            f"dice={best_metrics['dice']}, "
-            f"count={best_metrics['count']}, "
-            f"fitness={best_metrics['fitness']}"
-        ),
-        training_log_path,
+    run_metadata = {
+        "timestamp": datetime.now().isoformat(),
+        "cfg_path": cfg_path,
+        "save_dir": save_dir,
+        "exp_name": exp_name,
+        "dataset_name": dataset_name,
+        "num_samples": num_samples,
+        "split": data_split,
+        "seed": seed,
+        "model_class": patch_selector.__class__.__name__,
+        "model_module": patch_selector.__class__.__module__,
+        "num_model_params": int(sum(p.numel() for p in patch_selector.parameters())),
+        "num_classes": int(num_classes),
+        "loss_function": criterion.__class__.__name__,
+        "loss_params": {
+            "pos_weight": (
+                criterion.pos_weight.detach().cpu().tolist()
+                if getattr(criterion, "pos_weight", None) is not None
+                else None
+            )
+        },
+        "optimizer": optimizer.__class__.__name__,
+        "optimizer_params": dict(optimizer.defaults),
+        "epochs": int(epochs),
+        "batch_size": int(batch_size),
+        "num_workers": int(num_workers),
+        "device": device,
+        "clip_model_id": model_id,
+        "fitness_weight": fitness_weight,
+        "bce_loss_weight": bce_loss_weight,
+        "fitness_confidence_weight": fitness_conf_weight,
+        "fitness_feature_weight": fitness_feat_weight,
+        "keep_penalty": keep_penalty,
+        "selection_threshold": selection_threshold,
+        "min_keep_tokens": min_keep_tokens,
+        "weight_decay": weight_decay,
+        "selector_dropout": selector_dropout,
+        "lr_scheduler": lr_scheduler_cfg,
+        "log_val_fitness_loss": log_val_fitness_loss,
+        "resume_training": resume_training,
+        "resume_checkpoint_path": resume_checkpoint_path,
+        "resume_load_optimizer": resume_load_optimizer,
+        "resumed_from": resumed_from,
+        "start_epoch": int(start_epoch),
+    }
+
+    metadata_path = os.path.join(save_dir, "run_metadata.yaml")
+    with open(metadata_path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(run_metadata, f, sort_keys=False)
+    log_message(f"Saved run metadata to {metadata_path}", training_log_path)
+
+    best_val_cls_loss = load_metric_from_checkpoint(
+        os.path.join(save_dir, "checkpoint_best_cls.pt"),
+        "val_cls_loss",
     )
+    best_val_total_loss = load_metric_from_checkpoint(
+        os.path.join(save_dir, "checkpoint_best_total.pt"),
+        "val_total_loss",
+    )
+    if best_val_cls_loss is None and resumed_checkpoint is not None:
+        if resumed_checkpoint.get("val_cls_loss") is not None:
+            best_val_cls_loss = float(resumed_checkpoint["val_cls_loss"])
+    if best_val_total_loss is None and resumed_checkpoint is not None:
+        if resumed_checkpoint.get("val_total_loss") is not None:
+            best_val_total_loss = float(resumed_checkpoint["val_total_loss"])
 
-    # run_metadata = {
-    #     "timestamp": datetime.now().isoformat(),
-    #     "cfg_path": cfg_path,
-    #     "save_dir": save_dir,
-    #     "exp_name": exp_name,
-    #     "dataset_name": dataset_name,
-    #     "num_samples": num_samples,
-    #     "split": data_split,
-    #     "seed": seed,
-    #     "model_class": patch_selector.__class__.__name__,
-    #     "model_module": patch_selector.__class__.__module__,
-    #     "num_model_params": int(sum(p.numel() for p in patch_selector.parameters())),
-    #     "num_classes": int(num_classes),
-    #     "loss_function": criterion.__class__.__name__,
-    #     "loss_params": {
-    #         "pos_weight": (
-    #             criterion.pos_weight.detach().cpu().tolist()
-    #             if getattr(criterion, "pos_weight", None) is not None
-    #             else None
-    #         )
-    #     },
-    #     "optimizer": optimizer.__class__.__name__,
-    #     "optimizer_params": dict(optimizer.defaults),
-    #     "epochs": int(epochs),
-    #     "batch_size": int(batch_size),
-    #     "num_workers": int(num_workers),
-    #     "device": device,
-    #     "clip_model_id": model_id,
-    #     "fitness_loss_weight": fitness_loss_weight,
-    #     "bce_loss_weight": bce_loss_weight,
-    #     "dice_loss_weight": dice_loss_weight,
-    #     "count_loss_weight": count_loss_weight,
-    #     "fitness_confidence_weight": fitness_conf_weight,
-    #     "fitness_feature_weight": fitness_feat_weight,
-    #     "keep_penalty": keep_penalty,
-    #     "weight_decay": weight_decay,
-    #     "selector_dropout": selector_dropout,
-    #     "lr_scheduler": lr_scheduler_cfg,
-    #     "log_val_fitness_loss": avg_val_fitness_loss,
-    #     "resume_training": resume_training,
-    #     "resume_checkpoint_path": resume_checkpoint_path,
-    #     "resume_load_optimizer": resume_load_optimizer,
-    #     "resumed_from": resumed_from,
-    #     "start_epoch": int(start_epoch),
-    # }
-
-    # metadata_path = os.path.join(save_dir, "run_metadata.yaml")
-    # with open(metadata_path, "w", encoding="utf-8") as f:
-    #     yaml.safe_dump(run_metadata, f, sort_keys=False)
-    # log_message(f"Saved run metadata to {metadata_path}", training_log_path)
-
+    log_message(f"Initial best_val_cls_loss: {best_val_cls_loss}", training_log_path)
+    log_message(f"Initial best_val_total_loss: {best_val_total_loss}", training_log_path)
 
     log_message(f"{train_loader = }", training_log_path)
     log_message(f"{val_loader = }", training_log_path)
@@ -557,23 +548,14 @@ def main() -> None:
             training_log_path,
         )
         return
-
+#### training ####
     for epoch in range(start_epoch, epochs + 1):
         patch_selector.train()
-        # total_loss = 0.0
-        # total_cls_loss = 0.0
-        # total_dice_loss = 0.0
-        # total_count_loss = 0.0
-        # total_fitness_loss = 0.0
-        # total_acc = 0.0
-        # steps = 0
-
-        train_total_loss = 0.0
-        train_bce_loss = 0.0
-        train_dice_loss = 0.0
-        train_count_loss = 0.0
-        train_fitness_loss = 0.0
-        train_acc = 0.0
+        total_loss = 0.0
+        total_cls_loss = 0.0
+        total_fitness_loss = 0.0
+        total_acc = 0.0
+        train_keep_tracker = init_keep_tracker()
         steps = 0
 
         for imgs, targets in tqdm(train_loader, desc=f"Train {epoch}/{epochs}", leave=False):
@@ -595,8 +577,6 @@ def main() -> None:
                 criterion,
                 outputs_are_probs,
             )
-            dice_loss = dice_set_loss(probs, targets)
-            cnt_loss = count_match_loss(probs, targets, normalize_by_tokens=True)
 
             fitness_loss, fit_stats = differentiable_fitness_loss(
                 clip_model,
@@ -610,58 +590,57 @@ def main() -> None:
             )
 
             weighted_cls_loss = bce_loss_weight * cls_loss
-            weighted_dice_loss = dice_loss_weight * dice_loss
-            weighted_count_loss = count_loss_weight * cnt_loss
-            weighted_fitness_loss = fitness_loss_weight * fitness_loss
-            loss = weighted_cls_loss + weighted_dice_loss + weighted_count_loss + weighted_fitness_loss
+            weighted_fitness_loss = fitness_weight * fitness_loss
+            loss = weighted_cls_loss + weighted_fitness_loss
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             optimizer.step()
 
-            train_total_loss += loss.item()
-            train_bce_loss += cls_loss.item()
-            train_dice_loss += dice_loss.item()
-            train_count_loss += cnt_loss.item()
-            train_fitness_loss += fitness_loss.item()
-            train_acc += accuracy_at_threshold_with_probs(probs, targets)
+            total_loss += loss.item()
+            total_cls_loss += cls_loss.item()
+            total_fitness_loss += fitness_loss.item()
+            hard_mask = hard_selection_mask_from_probs(
+                probs,
+                thresh=selection_threshold,
+                min_keep_tokens_value=min_keep_tokens,
+            )
+            update_keep_tracker(train_keep_tracker, hard_mask)
+            total_acc += accuracy_at_threshold_with_probs(probs, targets, thresh=selection_threshold)
             steps += 1
 
             if fitness_log_interval > 0 and steps % fitness_log_interval == 0:
+                batch_keep_mean = hard_mask.float().mean().item()
                 log_message(
                     (
                         f"Epoch {epoch}/{epochs} Step {steps}: "
                         f"cls_loss={cls_loss.item():.4f}, "
-                        f"dice_loss={dice_loss.item():.4f}, "
-                        f"count_loss={cnt_loss.item():.4f}, "
                         f"fitness_loss={fitness_loss.item():.4f}, "
                         f"weighted_cls={weighted_cls_loss.item():.4f}, "
-                        f"weighted_dice={weighted_dice_loss.item():.4f}, "
-                        f"weighted_count={weighted_count_loss.item():.4f}, "
                         f"weighted_fitness={weighted_fitness_loss.item():.4f}, "
                         f"total={loss.item():.4f}, "
                         f"fitness_score={fit_stats['fitness_score']:.4f}, "
                         f"conf={fit_stats['confidence']:.4f}, "
                         f"feat={fit_stats['feature_preservation']:.4f}, "
-                        f"keep_ratio={fit_stats['keep_ratio']:.4f}"
+                        f"keep_ratio={fit_stats['keep_ratio']:.4f}, "
+                        f"hard_keep_pct={batch_keep_mean * 100:.2f}%"
                     ),
                     training_log_path,
                 )
 
-        avg_loss = train_total_loss / max(1, steps)
-        avg_cls_loss = train_bce_loss / max(1, steps)
-        avg_dice_loss = train_dice_loss / max(1, steps)
-        avg_count_loss = train_count_loss / max(1, steps)
-        avg_fitness_loss = train_fitness_loss / max(1, steps)
-        avg_acc = train_acc / max(1, steps)
+        avg_loss = total_loss / max(1, steps)
+        avg_cls_loss = total_cls_loss / max(1, steps)
+        avg_fitness_loss = total_fitness_loss / max(1, steps)
+        avg_acc = total_acc / max(1, steps)
+        train_keep_mean, train_keep_std, train_keep_min, train_keep_max = finalize_keep_tracker(train_keep_tracker)
 
+####### validation ######
         patch_selector.eval()
         val_total_loss = 0.0
         val_total_cls_loss = 0.0
-        val_total_dice_loss = 0.0
-        val_total_count_loss = 0.0
         val_total_fitness_loss = 0.0
         val_total_acc = 0.0
+        val_keep_tracker = init_keep_tracker()
         val_steps = 0
 
         with torch.no_grad():
@@ -684,78 +663,89 @@ def main() -> None:
                     criterion,
                     outputs_are_probs,
                 )
-                dice_loss = dice_set_loss(probs, targets)
-                cnt_loss = count_match_loss(probs, targets, normalize_by_tokens=True)
 
-            
-                fitness_loss, fit_stats = differentiable_fitness_loss(
-                    clip_model,
-                    patches,
-                    probs,
-                    text_features,
-                    orig_cls,
-                    keep_penalty_value=keep_penalty,
-                    confidence_weight=fitness_conf_weight,
-                    feature_weight=fitness_feat_weight,
-                )
-            
+                if log_val_fitness_loss:
+                    fitness_loss, _ = differentiable_fitness_loss(
+                        clip_model,
+                        patches,
+                        probs,
+                        text_features,
+                        orig_cls,
+                        keep_penalty_value=keep_penalty,
+                        confidence_weight=fitness_conf_weight,
+                        feature_weight=fitness_feat_weight,
+                    )
+                else:
+                    fitness_loss = torch.zeros((), device=cls_loss.device, dtype=cls_loss.dtype)
 
                 weighted_cls_loss = bce_loss_weight * cls_loss
-                weighted_dice_loss = dice_loss_weight * dice_loss
-                weighted_count_loss = count_loss_weight * cnt_loss
-                weighted_fitness_loss = fitness_loss_weight * fitness_loss
-                total_val_loss = weighted_cls_loss + weighted_dice_loss + weighted_count_loss + weighted_fitness_loss
+                weighted_fitness_loss = fitness_weight * fitness_loss
+                total_val_loss = weighted_cls_loss + weighted_fitness_loss
 
                 val_total_loss += total_val_loss.item()
                 val_total_cls_loss += cls_loss.item()
-                val_total_dice_loss += dice_loss.item()
-                val_total_count_loss += cnt_loss.item()
                 val_total_fitness_loss += fitness_loss.item()
-                val_total_acc += accuracy_at_threshold_with_probs(probs, targets)
+                hard_mask = hard_selection_mask_from_probs(
+                    probs,
+                    thresh=selection_threshold,
+                    min_keep_tokens_value=min_keep_tokens,
+                )
+                update_keep_tracker(val_keep_tracker, hard_mask)
+                val_total_acc += accuracy_at_threshold_with_probs(probs, targets, thresh=selection_threshold)
                 val_steps += 1
 
         avg_val_loss = val_total_loss / max(1, val_steps)
         avg_val_cls_loss = val_total_cls_loss / max(1, val_steps)
-        avg_val_dice_loss = val_total_dice_loss / max(1, val_steps)
-        avg_val_count_loss = val_total_count_loss / max(1, val_steps)
         avg_val_fitness_loss = val_total_fitness_loss / max(1, val_steps)
         avg_val_acc = val_total_acc / max(1, val_steps)
+        val_keep_mean, val_keep_std, val_keep_min, val_keep_max = finalize_keep_tracker(val_keep_tracker)
 
         epoch_log = {
             "epoch": epoch,
             "lr": optimizer.param_groups[0]["lr"],
             "train_total_loss": avg_loss,
-            "train_loss": avg_loss,
             "train_cls_loss": avg_cls_loss,
-            "train_bce_loss": avg_cls_loss,
-            "train_dice_loss": avg_dice_loss,
-            "train_count_loss": avg_count_loss,
             "train_fitness_loss": avg_fitness_loss,
             "train_bit_acc@0.5": avg_acc,
+            "train_keep_pct_mean": train_keep_mean * 100.0,
+            "train_keep_pct_std": train_keep_std * 100.0,
+            "train_keep_pct_min": train_keep_min * 100.0,
+            "train_keep_pct_max": train_keep_max * 100.0,
             "val_total_loss": avg_val_loss,
-            "val_loss": avg_val_loss,
+            "val_loss": avg_val_cls_loss,
             "val_cls_loss": avg_val_cls_loss,
-            "val_bce_loss": avg_val_cls_loss,
-            "val_dice_loss": avg_val_dice_loss,
-            "val_count_loss": avg_val_count_loss,
             "val_fitness_loss": avg_val_fitness_loss,
             "val_bit_acc@0.5": avg_val_acc,
+            "val_keep_pct_mean": val_keep_mean * 100.0,
+            "val_keep_pct_std": val_keep_std * 100.0,
+            "val_keep_pct_min": val_keep_min * 100.0,
+            "val_keep_pct_max": val_keep_max * 100.0,
         }
 
         log_message(
             (
                 f"Epoch {epoch}/{epochs} Train Total: {avg_loss:.4f} "
-                f"(Cls: {avg_cls_loss:.4f}, Dice: {avg_dice_loss:.4f}, Count: {avg_count_loss:.4f}, Fit: {avg_fitness_loss:.4f}) "
+                f"(Cls: {avg_cls_loss:.4f}, Fit: {avg_fitness_loss:.4f}) "
                 f"Bit Acc@0.5: {avg_acc:.4f} "
-                f"LR: {optimizer.param_groups[0]['lr']:.6g}"
+                f"LR: {optimizer.param_groups[0]['lr']:.6g} "
+                f"Keep% mean/std/min/max: "
+                f"{train_keep_mean * 100.0:.2f}/"
+                f"{train_keep_std * 100.0:.2f}/"
+                f"{train_keep_min * 100.0:.2f}/"
+                f"{train_keep_max * 100.0:.2f}"
             ),
             training_log_path,
         )
         log_message(
             (
                 f"Epoch {epoch}/{epochs} Val   Total: {avg_val_loss:.4f} "
-                f"(Cls: {avg_val_cls_loss:.4f}, Dice: {avg_val_dice_loss:.4f}, Count: {avg_val_count_loss:.4f}, Fit: {avg_val_fitness_loss:.4f}) "
-                f"Bit Acc@0.5: {avg_val_acc:.4f}"
+                f"(Cls: {avg_val_cls_loss:.4f}, Fit: {avg_val_fitness_loss:.4f}) "
+                f"Bit Acc@0.5: {avg_val_acc:.4f} "
+                f"Keep% mean/std/min/max: "
+                f"{val_keep_mean * 100.0:.2f}/"
+                f"{val_keep_std * 100.0:.2f}/"
+                f"{val_keep_min * 100.0:.2f}/"
+                f"{val_keep_max * 100.0:.2f}"
             ),
             training_log_path,
         )
@@ -770,64 +760,51 @@ def main() -> None:
             "train_total_loss": avg_loss,
             "train_loss": avg_loss,
             "train_cls_loss": avg_cls_loss,
-            "train_bce_loss": avg_cls_loss,
-            "train_dice_loss": avg_dice_loss,
-            "train_count_loss": avg_count_loss,
             "train_fitness_loss": avg_fitness_loss,
+            "train_keep_pct_mean": train_keep_mean * 100.0,
+            "train_keep_pct_std": train_keep_std * 100.0,
+            "train_keep_pct_min": train_keep_min * 100.0,
+            "train_keep_pct_max": train_keep_max * 100.0,
             "val_total_loss": avg_val_loss,
-            "val_loss": avg_val_loss,
+            "val_loss": avg_val_cls_loss,
             "val_cls_loss": avg_val_cls_loss,
-            "val_bce_loss": avg_val_cls_loss,
-            "val_dice_loss": avg_val_dice_loss,
-            "val_count_loss": avg_val_count_loss,
             "val_fitness_loss": avg_val_fitness_loss,
+            "val_keep_pct_mean": val_keep_mean * 100.0,
+            "val_keep_pct_std": val_keep_std * 100.0,
+            "val_keep_pct_min": val_keep_min * 100.0,
+            "val_keep_pct_max": val_keep_max * 100.0,
             "epoch_log": epoch_log,
         }
-        checkpoint["best_val_total_loss"] = best_metrics["total"]
-        checkpoint["best_val_cls_loss"] = best_metrics["cls"]
-        checkpoint["best_val_bce_loss"] = best_metrics["bce"]
-        checkpoint["best_val_dice_loss"] = best_metrics["dice"]
-        checkpoint["best_val_count_loss"] = best_metrics["count"]
-        checkpoint["best_val_fitness_loss"] = best_metrics["fitness"]
         if scheduler is not None:
             checkpoint["scheduler_state_dict"] = scheduler.state_dict()
 
         ckpt_path = os.path.join(save_dir, f"checkpoint_epoch_{epoch:03d}.pt")
         torch.save(checkpoint, ckpt_path)
 
-        current_metrics = {
-            "total": avg_val_loss,
-            "cls": avg_val_cls_loss,
-            "bce": avg_val_cls_loss,
-            "dice": avg_val_dice_loss,
-            "count": avg_val_count_loss,
-            "fitness": avg_val_fitness_loss,
-        }
-        for name, (metric_key, filename) in best_specs.items():
-            current_value = float(current_metrics[name])
-            previous_best = best_metrics[name]
-            if previous_best is None or current_value < float(previous_best):
-                best_metrics[name] = current_value
-                checkpoint["best_val_total_loss"] = best_metrics["total"]
-                checkpoint["best_val_cls_loss"] = best_metrics["cls"]
-                checkpoint["best_val_bce_loss"] = best_metrics["bce"]
-                checkpoint["best_val_dice_loss"] = best_metrics["dice"]
-                checkpoint["best_val_count_loss"] = best_metrics["count"]
-                checkpoint["best_val_fitness_loss"] = best_metrics["fitness"]
-                best_ckpt_path = os.path.join(save_dir, filename)
-                torch.save(checkpoint, best_ckpt_path)
-                if name == "cls":
-                    # Keep backward-compatible default checkpoint name.
-                    best_ckpt_default = os.path.join(save_dir, "checkpoint_best.pt")
-                    torch.save(checkpoint, best_ckpt_default)
-                log_message(
-                    f"Saved new best ({metric_key}) model to {best_ckpt_path}",
-                    training_log_path,
-                )
+        if best_val_cls_loss is None or avg_val_cls_loss < best_val_cls_loss:
+            best_val_cls_loss = avg_val_cls_loss
+            best_ckpt_path_cls = os.path.join(save_dir, "checkpoint_best_cls.pt")
+            torch.save(checkpoint, best_ckpt_path_cls)
+            # Keep backward-compatible name pointing to best-by-cls checkpoint.
+            best_ckpt_path_default = os.path.join(save_dir, "checkpoint_best.pt")
+            torch.save(checkpoint, best_ckpt_path_default)
+            log_message(
+                f"Saved new best (val_cls_loss) model to {best_ckpt_path_cls}",
+                training_log_path,
+            )
+
+        if best_val_total_loss is None or avg_val_loss < best_val_total_loss:
+            best_val_total_loss = avg_val_loss
+            best_ckpt_path_total = os.path.join(save_dir, "checkpoint_best_total.pt")
+            torch.save(checkpoint, best_ckpt_path_total)
+            log_message(
+                f"Saved new best (val_total_loss) model to {best_ckpt_path_total}",
+                training_log_path,
+            )
 
         if scheduler is not None:
             if scheduler_on_val:
-                scheduler.step(avg_val_loss)
+                scheduler.step(avg_val_cls_loss)
             else:
                 scheduler.step()
 

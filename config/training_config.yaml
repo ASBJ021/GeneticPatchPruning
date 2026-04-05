@@ -1,35 +1,67 @@
 # dataset_name: cifar100
-task: "training"
-exp_name: "Eval-imagenet-1k" # name your experiment
+task: "PatchSelector"  # "PatchSelector" # PatchSelectorWithSoftmax # "SimplePatchSelector" # "SimpleCNNAdaptivePool", "PatchSelectorResBlock", "LightweightPatchSelector"
+exp_name: "PS_50_samples_mlp_0.5_1.0"  # name your experiment
 device: "cuda"             # or "cpu"
-num_samples: 5000
-dataset_name: "ILSVRC/imagenet-1k" #"cifar100" # "ILSVRC/imagenet-1k"
-data_dir: "/home/vault/v123be/v123be15/imagenet-1k/data/"
-cache_dir: "/home/vault/v123be/v123be15/hf_cache" 
-split: "validation" # train test val validation
+num_samples: 354363 #354363  # number of samples to use, 0 means use all data ,352887,  354363
+dataset_name: "ILSVRC/imagenet-1k" #"cifar100" # "ILSVRC/imagenet-1k" "clane9/imagenet-100"  # "cifar10"  # "MNIST"  # "fashion_mnist"  # "clane9/imagenet-100"
+data_dir: "/home/utn/firi22ka/Desktop/jenga/GeneticPatchPruning/datasets/imagenet-1k/data/" 
+use_local_data: true # or false
+split: "train" # train test val validation
+cache_dir: "/var/lit2425/jenga/hf_cache"  # train test val validation
 model_id: "ViT-B/16"
 visualize: False
 
 # data related
-annotation_path: "./data/ILSVRC/imagenet-1k/0_0.3.jsonl" # path to annotation file
-data_split_ratio: [0.7, 0.15, 0.15] # [train, val, test] split ratios
-num_classes: 196 # toal number of patches of size 16*16 = 196  (14*14)
+annotation_path: "./Local_DATA_Collection/TS_clip_labels_conf_cosine_sim/ILSVRC/imagenet-1k/merged_full_spc50.jsonl" # path to annotation file
+data_split_ratio: [0.7, 0.29, 0.01] # [train, val, test] split ratios
+num_classes: 196 # toal number of patches of size 16*16 = 196  (14*14 patches)
 
 # Training
+mlp: "PatchSelector" # or "PatchSelector", "PatchSelectorWithSoftmax", "SimplePatchSelectorWithDropout", "SimplePatchSelector", "PatchSelectorResBlock", "LightweightPatchSelector"
+mixer_mlp_ratio: [0.5, 1.0] 
 batch_size: 32
-epochs: 50
-lr: 0.0001
+epochs: 100
+lr: 1.0e-5
+weight_decay: 0.05
+selector_dropout: 0.2
+lr_scheduler:
+  name: "cosine"   # one of: none, step, cosine, plateau
+  step_size: 10
+  gamma: 0.5
+  t_max: 100
+  min_lr: 1.0e-6
+  factor: 0.5
+  patience: 2
+  mode: "min"
 img_size: 224
-num_workers: 2
+num_workers: 8
 device: cuda
-save_dir: "./model_checkpoints_ep50"
+save_dir: "./Model_0.3_lrs/PatchSelector"
 seed: 42
+resume_training: false # true or false, whether to resume training from a checkpoint
+resume_checkpoint_path: "/home/utn/firi22ka/Desktop/jenga/GeneticPatchPruning/Model_0.3_fitness_loss/LightweightPatchSelector/imagenet-1k_0_0.3_LPS_50_samples_full_50/checkpoint_epoch_050.pt"  # absolute path or file name inside save_dir/exp_name (e.g., checkpoint_epoch_010.pt)
+resume_load_optimizer: false  # if false, only model weights are loaded
 
+keep_penalty: 0.0
+selection_threshold: 0.5   # threshold used for hard keep stats/accuracy logging
+min_keep_tokens: 20         # minimum patches kept per image when deriving hard masks
+
+weights:
+   fitness_loss: 1.0
+   conf: 0.4
+   feat: 0.6
+   bce_loss: 1.0
+   dice_loss: 1.0
+   count_loss: 1.0
+fitness_log_interval: 0
+
+
+use_kl_divergence_loss: false # true or false
 # Prediction export
 predictions_jsonl: "predictions.jsonl"
 pred_thresh: 0.5
 
 #testing 
-model_checkpoint: "/var/lit2425/jenga/GeneticPatchPruning/gpp/model_checkpoints_ep50/Test/checkpoint_best.pt" 
-res_dir: "results" # direcrotory to save results
+model_checkpoint: "model_patch_selector_with_softmax/imagenet-1k_val/checkpoint_best.pt" 
+res_dir: "results/imagenet-1k_val_patch_selector_with_softmax" # direcrotory to save results
  

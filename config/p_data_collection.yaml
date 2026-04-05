@@ -26,4 +26,4 @@ optimize_keep: true
 min_keep_pct: 0.1  # lower bound on keep ratio when optimizing
 max_keep_pct: 0.95  # upper bound on keep ratio when optimizing
 keep_penalty: 0.5 # penalty strength for keeping more patches (trade-off)
-
+ga_visualization: true  # save per-step GA logs and overlays to ga_vsialization/

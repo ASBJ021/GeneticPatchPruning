@@ -66,6 +66,25 @@ def get_confidence_score_from_tokens(model, device: str, x_tokens, indices_to_re
 
 
 @torch.no_grad()
+def get_kl_divergence_from_tokens(model, device: str, x_tokens, indices_to_remove: List[int], original_cls, text_features) -> float:
+    
+    masked_cls = cls_from_masked_tokens(model, device, x_tokens, indices_to_remove)
+    masked_logits = masked_cls @ text_features.T
+    # masked_probs = masked_logits.softmax(dim=-1) # predicted distribution
+    masked_log = masked_logits.log_softmax(dim=-1)
+
+    original_logits = original_cls @ text_features.T
+    # original_probs = original_logits.softmax(dim=-1)  # original distribution
+    original_log = original_logits.log_softmax(dim=-1)
+
+    # kl_div = F.kl_div(masked_probs.log(), original_probs.log(), reduction='batchmean', log_target=True)
+    kl_div = F.kl_div(masked_log, original_log, reduction='batchmean', log_target=True)
+    # normalize KL divergence to [0, 1] range for better interpretability
+    # kl_div = kl_div / (kl_div + 1)  #
+
+    return kl_div.item()
+
+@torch.no_grad()
 def get_feature_preservation_score_from_tokens(model, device: str, x_tokens, indices_to_remove: List[int], original_cls) -> float:
     masked_cls = cls_from_masked_tokens(model, device, x_tokens, indices_to_remove)
     return F.cosine_similarity(original_cls, masked_cls).item()
@@ -82,12 +101,19 @@ def fitness_function_from_tokens(
 
 ):
     save_fitness_scores = False
-    fitness_log_path = "./logs/new_fitness_logs_cosine_cs/fitness_scores_cls_cosine.jsonl"
+    fitness_log_path = "./Local_DATA_Collection/logs/kl_div_log_probs/fitness_scores.jsonl"
     weights = weights or {"confidence": 0.4, "feature": 0.6}
+    # weights = weights or {"confidence": 0.3, "feature": 0.4, "kl_div": 0.3}
     conf = get_confidence_score_from_tokens(model, device, x_tokens, indices, text_features)
+
+    kl_div = get_kl_divergence_from_tokens(model, device, x_tokens, indices, original_cls, text_features)
+
     # print(f"{conf.shape = }")
     feat = get_feature_preservation_score_from_tokens(model, device, x_tokens, indices, original_cls)
     # print(f'{feat.shape = }')
+
+    # score = weights["confidence"] * conf + weights["feature"] * feat - weights["kl_div"] * kl_div
+
     score = weights["confidence"] * conf + weights["feature"] * feat
 
     if save_fitness_scores:
@@ -95,6 +121,7 @@ def fitness_function_from_tokens(
             {
                 "confidence_score": conf,
                 "feature_preservation_score": feat,
+                "kl_divergence": kl_div,
                 "fitness_score": score,
             },
             fitness_log_path,

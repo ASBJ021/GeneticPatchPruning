@@ -1,31 +1,42 @@
 # dataset_name: cifar100
 task: "Benchmarking"
 device: "cuda"             # or "cpu"
-num_samples: 100
-dataset_name: "clane9/imagenet-100" #"cifar100" #
+num_samples: 0 #1000  #keep it 0 if you want to chek on full dataset 
+dataset_name: "ILSVRC/imagenet-1k" #"cifar100" # "clane9/imagenet-100" # ILSVRC/imagenet-1k
+data_dir: "/home/utn/firi22ka/Desktop/jenga/GeneticPatchPruning/datasets/imagenet-1k/data/" 
+use_local_data: true #  true or false
 split: "validation" # train test val validation
+cache_dir: "/var/lit2425/jenga/hf_cache" 
 
-visualize: False
+visualize: false
 
 # annotations: /home/utn/firi22ka/Desktop/jenga/Adaptive-Tokenization/new_src/clane9/imagenet-100_500_0.3_1758275065.0351467.jsonl
 
 # only to collect data
-keep_pct: 1 # 0 to 1 
+keep_pct: 0.6 # 0 to 1; ignored by adaptive_eval.py (set 0 for model-decided adaptive keep)
+min_keep_tokens: 20 # lower bound for adaptive threshold mode
 
 # data related
-annotation_path: "/home/utn/firi22ka/Desktop/jenga/GeneticPatchPruning/data/ILSVRC/imagenet-1k/500_0.3_1762594505.0590034.jsonl" # path to annotation file
+annotation_path: "./data/ILSVRC/0_0.3.jsonl" # path to annotation file
 
 # Prediction export
 predictions_jsonl: ./checkpoints01/predictions.jsonl
-pred_thresh: 0.5
+
 
 #models
 model_id: "ViT-B/16"
-gpp_model_checkpoint: "/var/lit2425/jenga/GeneticPatchPruning/gpp/model_checkpoints_ep50/Test/checkpoint_best.pt" 
+mlp: "PatchSelector" # or "PatchSelector" or "SimplePatchSelector", "PatchSelectorWithSoftmax", "SimplePatchSelectorWithDropout", "PatchSelectorResBlock", LightweightPatchSelector
+mixer_mlp_ratio: [0.5, 1.0] # MLP ratio for the MixerBlock in PatchSelector, can be a single float or a tuple (min, max) for random sampling each epoch
+# gpp_model_checkpoint: "./Model_0.3_lrs/PatchSelector/PS_50_samples_mlp_0.5_1.0/checkpoint_best_fitness.pt"
+gpp_model_checkpoint: "./Model_0.3_lrs/PatchSelector/PS_50_samples_mlp_0.5_1.0/checkpoint_epoch_090.pt" #90, 
+selection_threshold: 0.5  # threshold used for hard keep stats/accuracy logging
+pred_thresh: 0.5
 
 #benchmarks  # 
-strategies: ["clip","gpp"]
+strategies: ["gradient"]  #["gpp"] , "clip", "random", "topk"
+save_per_img_metrics: false
+# per_img_metrics: ["inf_time_per_img", "memory_usage_per_img", "keep_tokens", "keep_pct"]
 metrics: ["accuracy","avg_inference_time","avg_tokens_used"]
-
+save_dir: "./Gradient_Benchmark_Results" # directory to save benchmark results
 
 

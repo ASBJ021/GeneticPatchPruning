@@ -1,3 +1,4 @@
+from pyexpat import model
 from typing import List, Tuple
 import os
 import sys
@@ -47,17 +48,16 @@ num_workers = cfg["num_workers"]
 epochs = cfg["epochs"]
 mlp = cfg["mlp"]
 
-model, processor = clip.load(model_id, device)  # Load on CPU initially
-model.float()  # Ensure model is in float32
+
 
 class PatchSelector(nn.Module):
-    def __init__(self, in_embed_dim=768, out_embed_dim=196) -> None:
+    def __init__(self, in_embed_dim=768, out_embed_dim=196, mixer_mlp_ratio=(0.5, 4.0)) -> None:
         super().__init__()
         self.adaptive_pool = nn.AdaptiveAvgPool1d(in_embed_dim)
         #encoder_layer = nn.TransformerEncoderLayer(d_model=in_embed_dim, nhead=8)
         #self.in_conv = nn.TransformerEncoder(encoder_layer, num_layers=2)
         self.in_conv = nn.Sequential(
-            MixerBlock(in_embed_dim, 196)
+            MixerBlock(in_embed_dim, 196, mlp_ratio = mixer_mlp_ratio)
         )
         self.fc = nn.Linear(in_embed_dim, 1)
         
@@ -95,6 +95,85 @@ class PatchSelectorWithSoftmax(nn.Module):
         
         return x
 
+class _LightweightResidualBlock(nn.Module):
+    def __init__(self, dim: int, mlp_ratio: float = 2.0, dropout: float = 0.1) -> None:
+        super().__init__()
+        hidden = int(dim * mlp_ratio)
+        self.norm = nn.LayerNorm(dim)
+        self.fc1 = nn.Linear(dim, hidden)
+        self.act = nn.GELU()
+        self.fc2 = nn.Linear(hidden, dim)
+        self.drop = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        residual = x
+        x = self.norm(x)
+        x = self.fc1(x)
+        x = self.act(x)
+        x = self.drop(x)
+        x = self.fc2(x)
+        x = self.drop(x)
+        return x + residual
+
+
+class LightweightPatchSelector(nn.Module):
+    """
+    Lightweight selector:
+    - projects 768-d patch tokens to a compact hidden dimension
+    - applies a few residual MLP blocks
+    - outputs one logit per patch
+    """
+    def __init__(
+        self,
+        in_embed_dim: int = 768,
+        hidden_dim: int = 256,
+        num_blocks: int = 2,
+        mlp_ratio: float = 1.0,
+        dropout: float = 0.1,
+        num_patches: int = 196,
+    ) -> None:
+        super().__init__()
+        self.in_norm = nn.LayerNorm(in_embed_dim)
+        self.in_proj = nn.Linear(in_embed_dim, hidden_dim)
+        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, hidden_dim))
+        self.blocks = nn.Sequential(
+            *[
+                _LightweightResidualBlock(
+                    dim=hidden_dim,
+                    mlp_ratio=mlp_ratio,
+                    dropout=dropout,
+                )
+                for _ in range(num_blocks)
+            ]
+        )
+        self.out_norm = nn.LayerNorm(hidden_dim)
+        self.head = nn.Linear(hidden_dim, 1)
+
+        nn.init.trunc_normal_(self.pos_embed, std=0.02)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: [B, N, 768], output: [B, N, 1] logits
+        x = self.in_norm(x)
+        x = self.in_proj(x)
+
+        if x.size(1) == self.pos_embed.size(1):
+            x = x + self.pos_embed
+        elif x.size(1) < self.pos_embed.size(1):
+            x = x + self.pos_embed[:, :x.size(1), :]
+        else:
+            pos = F.interpolate(
+                self.pos_embed.transpose(1, 2),
+                size=x.size(1),
+                mode="linear",
+                align_corners=False,
+            ).transpose(1, 2)
+            x = x + pos
+
+        x = self.blocks(x)
+        x = self.out_norm(x)
+        x = self.head(x)
+        return x
+
 class SimplePatchSelector(nn.Module):
     def __init__(self, in_embed_dim=768, out_embed_dim=196) -> None:
         super().__init__()
@@ -119,22 +198,22 @@ class SimplePatchSelector(nn.Module):
         return x
 
 class SimplePatchSelectorWithDropout(nn.Module):
-    def __init__(self, in_embed_dim=768, out_embed_dim=196) -> None:
+    def __init__(self, in_embed_dim=768, out_embed_dim=196, dropout: float = 0.1) -> None:
         super().__init__()
         self.norm = nn.LayerNorm(in_embed_dim)
         self.mlp = nn.Sequential(
             nn.Linear(in_embed_dim, 512),
             nn.GELU(),
-            nn.Dropout(0.1),
+            nn.Dropout(dropout),
             nn.Linear(512, 1024),
             nn.GELU(),
-            nn.Dropout(0.1),
+            nn.Dropout(dropout),
             nn.Linear(1024, 512),
             nn.GELU(),
-            nn.Dropout(0.1),
+            nn.Dropout(dropout),
             nn.Linear(512, out_embed_dim),
             nn.GELU(),
-            nn.Dropout(0.1),
+            nn.Dropout(dropout),
             nn.Linear(out_embed_dim, 1)
         )
         
@@ -188,7 +267,7 @@ class PatchSelectorResBlock(nn.Module):
         # print(f'After FC: {x.shape}')
         return x
 
-def images_to_patches(imgs):
+def images_to_patches(imgs, model, processor, device):
     patches = []
     for img in imgs:
         pil_img = to_pil(img.cpu())
@@ -219,6 +298,40 @@ def images_to_patches(imgs):
     return patches
 
 
+
+def images_to_patches_cls(imgs, model, processor, device):
+    patches = []
+    orinig_cls_tokens = []
+    for img in imgs:
+        pil_img = to_pil(img.cpu())
+        pixel_values = processor(pil_img).unsqueeze(0).to(device)
+        with torch.no_grad():
+            x = model.visual.conv1(pixel_values)
+            B, D, H, W = x.shape
+            tokens = x.reshape(B, D, -1).permute(0, 2, 1)
+
+            cls_token = model.visual.class_embedding.unsqueeze(0).expand(B, -1, -1)
+            tokens = torch.cat([cls_token, tokens], dim=1)
+            tokens += model.visual.positional_embedding.unsqueeze(0)
+
+            tokens = model.visual.ln_pre(tokens)
+            tokens = tokens.permute(1, 0, 2)
+            tokens = model.visual.transformer(tokens)
+            tokens = tokens.permute(1, 0, 2)
+
+            orig_cls_token = tokens[:, 0, :]
+            orig_cls_token = model.visual.ln_post(orig_cls_token)
+
+            if model.visual.proj is not None:
+                orig_cls_token = orig_cls_token @ model.visual.proj
+
+            orig_cls_token /= orig_cls_token.norm(dim=-1, keepdim=True)
+            patch_tokens = tokens[:, 1:, :]
+            patches.append(patch_tokens)
+            orinig_cls_tokens.append(orig_cls_token)
+    return patches, orinig_cls_tokens
+
+
 def main():
 
     # load dataset
@@ -226,6 +339,9 @@ def main():
     print(f'{num_samples = }')
     ds,  = load_data_normal(dataset_name, num_samples, data_split)
     # print(ds)
+    #load clip model and processor
+    model, processor = clip.load(model_id, device)  # Load on CPU initially
+    model.float()  # Ensure model is in float32
 
     full_dataset = PatchIndexDataset(ds=ds, jsonl_path=annotation_path, img_size=img_size)
     num_classes = full_dataset.num_classes
@@ -261,6 +377,8 @@ def main():
         patch_selector = PatchSelector().to(device)
     elif mlp == "SimplePatchSelector":
         patch_selector = SimplePatchSelector().to(device)
+    elif mlp == "LightweightPatchSelector":
+        patch_selector = LightweightPatchSelector().to(device)
 
     criterion = nn.BCEWithLogitsLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg["lr"])
@@ -286,7 +404,7 @@ def main():
             # print(targets.shape)
 
             # convert images to clip [patches]
-            patches = images_to_patches(imgs)
+            patches = images_to_patches(imgs, model, processor, device)
             patches = torch.cat(patches, dim=0).to(device)
             print(len(patches))
             print(patches[0].shape)
@@ -329,7 +447,7 @@ def main():
                 # print(targets.shape)
 
                 # convert images to clip [patches]
-                patches = images_to_patches(imgs)
+                patches = images_to_patches(imgs, model, processor, device)
                 patches = torch.cat(patches, dim=0).to(device)
 
                 # logits = model(imgs)

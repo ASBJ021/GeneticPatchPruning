@@ -45,6 +45,8 @@ def main():
     #         print(f'{kp:>10} | {n:>10}')
 
     # round_decimals = 2
+    # finding wrong index ids
+    
     pct_counter = Counter(round(float(r['keep_pct']))
                           for r in records if 'keep_pct' in r and isinstance(r['keep_pct'], (int, float)))
     

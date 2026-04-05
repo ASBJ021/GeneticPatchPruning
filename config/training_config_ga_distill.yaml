@@ -1,0 +1,62 @@
+# GA-aligned selector distillation training config
+
+task: "GAAlignedDistill"
+exp_name: "PS_ga_distill"
+device: "cuda"
+
+num_samples:  100 #354363  # number of samples to use, 0 means use all data ,352887,  354363
+dataset_name: "ILSVRC/imagenet-1k"
+data_dir: "/home/utn/firi22ka/Desktop/jenga/GeneticPatchPruning/datasets/imagenet-1k/data/"
+use_local_data: true
+split: "train"
+cache_dir: "/var/lit2425/jenga/hf_cache"
+model_id: "ViT-B/16"
+
+# data related
+annotation_path: "./Local_DATA_Collection/TS_clip_labels_conf_cosine_sim/ILSVRC/imagenet-1k/merged_full_spc50.jsonl"
+data_split_ratio: [0.75, 0.24, 0.01] # [train, val, test] split ratios
+num_classes: 196 # toal number of patches of size 16*16 = 196  (14*14)
+
+mlp: "PatchSelector" # or "PatchSelector" or "PatchSelectorWithSoftmax" or "SimplePatchSelectorWithDropout" or "SimplePatchSelector",  "PatchSelectorResBlock"
+mixer_mlp_ratio: [0.5, 1.0] # MLP ratio for the MixerBlock in PatchSelector, can be a single float or a tuple (min, max) for random sampling each epoch
+batch_size: 32
+epochs: 100
+lr: 1.0e-5
+lr_scheduler:
+  name: "cosine"
+  step_size: 10
+  gamma: 0.5
+  t_max: 100
+  min_lr: 1.0e-6
+  factor: 0.5
+  patience: 2
+  mode: "min"
+weight_decay: 0.05
+selector_dropout: 0.2
+img_size: 224
+num_workers: 8
+seed: 42
+
+
+resume_training: false
+resume_checkpoint_path: ""
+resume_load_optimizer: true
+
+keep_penalty: 0.0
+fitness_log_interval: 0
+
+selection:
+  mode: "adaptive_topk"
+  min_keep_tokens: 20
+  max_keep_tokens: 0
+
+weights:
+  bce_loss: 1.0
+  dice_loss: 1.0
+  count_loss: 1.0
+  fitness_loss: 1.0
+  conf: 0.4
+  feat: 0.6
+
+
+save_dir: "./Model_0.3_ga_distill/LightweightPatchSelector_${lr_scheduler.name}"

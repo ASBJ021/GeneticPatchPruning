@@ -1,0 +1,35 @@
+# GA-aligned selector evaluation config
+
+task: "GAAlignedBenchmark"
+device: "cuda"
+
+num_samples: 0 #keep it 0 if you want to chek on full dataset  
+dataset_name: "ILSVRC/imagenet-1k"
+data_dir: "/home/utn/firi22ka/Desktop/jenga/GeneticPatchPruning/datasets/imagenet-1k/data/"
+use_local_data: false 
+split: "validation"
+cache_dir: "/var/lit2425/jenga/hf_cache"
+
+visualize: False
+#models
+model_id: "ViT-B/16"
+mlp: "PatchSelector" # or "PatchSelector",  LightweightPatchSelectoror "SimplePatchSelector", "PatchSelectorWithSoftmax", "SimplePatchSelectorWithDropout", "PatchSelectorResBlock", 
+mixer_mlp_ratio: [0.5, 1.0] # 0 to 1; ignored by non-MLP models
+# gpp_model_checkpoint: "./Model_0.3_ga_distill/LightweightPatchSelector/LPS_ga_distill_lr_0.0001_cosine/checkpoint_epoch_090.pt" # path to the checkpoint of the GPP model to be evaluated
+gpp_model_checkpoint: "./Model_0.3_ga_distill/mlp_0.5_1.0/PS_ga_distill_fit_0.8_cls_1.2/checkpoint_best_bce.pt"
+selection_threshold: 0.5  # threshold used for hard keep stats/accuracy logging
+pred_thresh: 0.5
+
+#GA aligned distillation
+selection:
+  mode: "adaptive_topk" # otsu , adaptive_topk
+  otsu_bins: 196
+  min_keep_tokens: 20
+  max_keep_tokens: 0
+
+#benchmarks  # 
+strategies: ["gpp"] # clip, gpp
+save_per_img_metrics: False
+per_img_metrics: ["inf_time_per_img", "memory_usage_per_img", "keep_tokens", "keep_pct"]
+metrics: ["accuracy","avg_inference_time","avg_tokens_used"]
+save_dir: "./Model_0.3_ga_distill/mlp_0.5_1.0/PS_ga_distill_fit_0.8_cls_1.2/ga_vis"

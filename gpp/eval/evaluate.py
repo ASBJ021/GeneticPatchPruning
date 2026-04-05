@@ -23,7 +23,7 @@ from tqdm import tqdm
 from torchvision import transforms
 
 from gpp.dataset.data_utils import load_data_normal, build_dataloaders, PatchIndexDataset, _load_jsonl, split_dataset
-from gpp.model.model import PatchSelector, PatchSelectorWithSoftmax,images_to_patches, SimplePatchSelector, SimplePatchSelectorWithDropout, PatchSelectorResBlock
+from gpp.model.model import PatchSelector, PatchSelectorWithSoftmax,images_to_patches, SimplePatchSelector, SimplePatchSelectorWithDropout, PatchSelectorResBlock, LightweightPatchSelector
 from gpp.model.clip_model import forward_with_selected_patches, load_clip
 from gpp.utils.visual_utils import plot_heatmap_overlay 
 
@@ -290,6 +290,9 @@ def main():
     elif mlp == "PatchSelectorResBlock":
         print(f'Training started using MLP: {mlp}')
         selector = PatchSelectorResBlock().to(device)
+    elif mlp == "LightweightPatchSelector":
+        print(f'Training started using MLP: {mlp}')
+        selector = LightweightPatchSelector().to(device)
     else: 
         print(f"Please select an MLP in {cfg_path}")
         return

@@ -1,0 +1,101 @@
+PROJECT_ROOT = PosixPath('/var/lit2425/jenga/GeneticPatchPruning')
+Loading config from /var/lit2425/jenga/GeneticPatchPruning/config/config.yaml
+Loading config from /var/lit2425/jenga/GeneticPatchPruning/config/training_config.yaml
+ckpt_path = 'model_patch_selector_with_softmax/imagenet-1k_val/checkpoint_best.pt'
+Evaluating on dataset: ILSVRC/imagenet-1k | split: validation 
+Model CKpt path: ./Model_0.3_lrs/PatchSelector/PS_50_samples_mlp_0.5_1.0/checkpoint_epoch_090.pt
+Evaluating on full ILSVRC/imagenet-1k dataset | split: validation
+Loading data from local directory: /home/utn/firi22ka/Desktop/jenga/GeneticPatchPruning/datasets/imagenet-1k/data/
+Loading validation data from /home/utn/firi22ka/Desktop/jenga/GeneticPatchPruning/datasets/imagenet-1k/data/
+{'image': <PIL.JpegImagePlugin.JpegImageFile image mode=RGB size=408x500 at 0x7FE888315990>, 'label': 91}
+
+ Benchmarking on : ['random', 'uniform']
+
+Evaluating strategy: random | keep_pct: 1.0
+
+Evaluating strategy: random | keep_pct: 0.9
+
+Evaluating strategy: random | keep_pct: 0.8
+
+Evaluating strategy: random | keep_pct: 0.7
+
+Evaluating strategy: random | keep_pct: 0.6
+
+Evaluating strategy: random | keep_pct: 0.5
+
+Evaluating strategy: random | keep_pct: 0.3
+
+Evaluating strategy: random | keep_pct: 0.2
+
+Evaluating strategy: random | keep_pct: 0.1
+
+Evaluating strategy: uniform | keep_pct: 1.0
+
+Evaluating strategy: uniform | keep_pct: 0.9
+
+Evaluating strategy: uniform | keep_pct: 0.8
+
+Evaluating strategy: uniform | keep_pct: 0.7
+
+Evaluating strategy: uniform | keep_pct: 0.6
+
+Evaluating strategy: uniform | keep_pct: 0.5
+
+Evaluating strategy: uniform | keep_pct: 0.3
+
+Evaluating strategy: uniform | keep_pct: 0.2
+
+Evaluating strategy: uniform | keep_pct: 0.1
+/var/lit2425/jenga/GeneticPatchPruning/gpp/eval/compare.py:19: FutureWarning: DataFrame.applymap has been deprecated. Use DataFrame.map instead.
+  acc_df = acc_df.applymap(lambda x: f"{x*100:.2f}%")
+/var/lit2425/jenga/GeneticPatchPruning/gpp/eval/compare.py:20: FutureWarning: DataFrame.applymap has been deprecated. Use DataFrame.map instead.
+  time_df = time_df.applymap(lambda x: f"{x:.4f}s")
+Accuracy Table:
+/var/lit2425/jenga/Adaptive-Tokenization/at/lib/python3.10/site-packages/beautifultable/utils.py:125: FutureWarning: 'BeautifulTable.column_headers' has been deprecated in 'v1.0.0' and will be removed in 'v1.2.0'. Use 'BTColumnCollection.header' instead.
+  warnings.warn(message, FutureWarning)
+/var/lit2425/jenga/Adaptive-Tokenization/at/lib/python3.10/site-packages/beautifultable/utils.py:125: FutureWarning: 'BeautifulTable.append_row' has been deprecated in 'v1.0.0' and will be removed in 'v1.2.0'. Use 'BTRowCollection.append' instead.
+  warnings.warn(message, FutureWarning)
++----------+--------+---------+
+| keep_pct | random | uniform |
++----------+--------+---------+
+|   0.1    | 4.27%  |  4.87%  |
++----------+--------+---------+
+|   0.2    | 18.76% | 22.01%  |
++----------+--------+---------+
+|   0.3    | 35.41% | 30.36%  |
++----------+--------+---------+
+|   0.5    | 54.50% | 48.70%  |
++----------+--------+---------+
+|   0.6    | 58.32% | 55.86%  |
++----------+--------+---------+
+|   0.7    | 60.94% | 60.49%  |
++----------+--------+---------+
+|   0.8    | 62.54% | 62.64%  |
++----------+--------+---------+
+|   0.9    | 63.57% | 63.94%  |
++----------+--------+---------+
+|   1.0    | 64.49% | 64.49%  |
++----------+--------+---------+
+
+Average Inference Time Table:
++----------+---------+---------+
+| keep_pct | random  | uniform |
++----------+---------+---------+
+|   0.1    | 0.0023s | 0.0022s |
++----------+---------+---------+
+|   0.2    | 0.0023s | 0.0023s |
++----------+---------+---------+
+|   0.3    | 0.0023s | 0.0023s |
++----------+---------+---------+
+|   0.5    | 0.0023s | 0.0023s |
++----------+---------+---------+
+|   0.6    | 0.0024s | 0.0024s |
++----------+---------+---------+
+|   0.7    | 0.0026s | 0.0027s |
++----------+---------+---------+
+|   0.8    | 0.0026s | 0.0027s |
++----------+---------+---------+
+|   0.9    | 0.0028s | 0.0028s |
++----------+---------+---------+
+|   1.0    | 0.0032s | 0.0032s |
++----------+---------+---------+

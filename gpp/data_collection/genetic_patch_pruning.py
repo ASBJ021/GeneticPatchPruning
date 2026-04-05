@@ -20,7 +20,7 @@ import time
 
 # ─── Load Config ─────────────────────────────────────────────────────
 # cfg_path = os.path.join(os.path.dirname(__file__), "config.yaml")
-cfg_path = '/home/atuin/v123be/v123be15/GeneticPatchPruning/config/data_colletion.yaml'
+cfg_path = './config/data_colletion.yaml'
 
 print(f'{cfg_path = }')
 cfg = load_config(cfg_path)
@@ -38,6 +38,7 @@ data_dir = cfg["data_dir"]
 data_split = cfg['split']
 # print(f'{data_split = }')
 cache_dir = cfg['cache_dir']
+use_clip_labels = cfg.get('use_clip_labels', False)
 # print(f'{cache_dir = }')
 # ─── Load GA config ────────────────────────────────────────────────
 keep_pct = cfg["keep_pct"]
@@ -46,6 +47,7 @@ optimize_keep = cfg.get("optimize_keep", False)
 min_keep_pct = cfg.get("min_keep_pct", 0.1)
 max_keep_pct = cfg.get("max_keep_pct", 0.9)
 keep_penalty = cfg.get("keep_penalty", 0.1)
+ga_visualization = cfg.get("ga_visualization", False)
 # ml_model = cfg["model_checkpoint"]
 # ─── Load Model ──────────────────────────────────────────────────────
 model_id = cfg["model_id"] # clip model id
@@ -69,12 +71,12 @@ def main():
 
     # out_path_jsonl = f"{dataset_name}_{num_samples}_final_patches_{int(keep_penalty * 100)}.jsonl"
     # Preserve original behavior: override path with hard-coded target
-    # out_path_jsonl = (
-    #     f"{save_path}{dataset_name}/{num_samples}_{keep_penalty}.jsonl"
-    # )
+    out_path_jsonl = (
+        f"{save_path}{dataset_name}/{num_samples}_{keep_penalty}.jsonl"
+    )
     
 
-    out_path_jsonl = '/home/atuin/v123be/v123be15/GeneticPatchPruning/data/ILSVRC/imagenet-1k/0_0.3.jsonl'
+    # out_path_jsonl = '/home/atuin/v123be/v123be15/GeneticPatchPruning/data/ILSVRC/imagenet-1k/0_0.3.jsonl'
 
     _ = patch_modified_clip(
         dataset,
@@ -91,6 +93,8 @@ def main():
         min_keep_pct=min_keep_pct,
         max_keep_pct=max_keep_pct,
         keep_penalty=keep_penalty,
+        use_clip_labels=use_clip_labels,
+        ga_visualization=ga_visualization,
     )
 
     print(
