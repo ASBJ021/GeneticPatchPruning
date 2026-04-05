@@ -21,11 +21,19 @@ from tqdm import tqdm
 from torchvision import transforms
 
 from gpp.dataset.data_utils import load_data_normal, build_dataloaders, PatchIndexDataset, _load_jsonl, split_dataset, load_data_folder
-from gpp.model.model import PatchSelector, PatchSelectorWithSoftmax, images_to_patches, SimplePatchSelector, SimplePatchSelectorWithDropout, PatchSelectorResBlock
+from gpp.model.model import PatchSelector, PatchSelectorWithSoftmax, images_to_patches, SimplePatchSelector, SimplePatchSelectorWithDropout, PatchSelectorResBlock, LightweightPatchSelector
+
+
+def log_message(message: str, log_path: Optional[str] = None) -> None:
+    timestamped_message = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {message}"
+    print(timestamped_message)
+    if log_path is not None:
+        with open(log_path, "a", encoding="utf-8") as log_file:
+            log_file.write(timestamped_message + "\n")
 
 
 cfg_path = '/var/lit2425/jenga/GeneticPatchPruning/config/training_config.yaml'
-print (f'Loading config from {cfg_path}')
+log_message(f'Loading config from {cfg_path}')
 
 with open(cfg_path, "r") as f:
     cfg = yaml.safe_load(f)
@@ -56,9 +64,12 @@ exp_name = cfg["exp_name"]
 mlp = cfg['mlp']
 
 save_dir = f'{save_dir}/{exp_name}'
-print(f'{save_dir = }')
-
 Path(save_dir).mkdir(parents=True, exist_ok=True)
+training_log_path = os.path.join(save_dir, "training_log.txt")
+with open(training_log_path, "w", encoding="utf-8"):
+    pass
+log_message(f'{save_dir = }', training_log_path)
+log_message(f'Training logs will be saved to: {training_log_path}', training_log_path)
 
 config_save_path = os.path.join(save_dir, "training_config.yaml")
 shutil.copy(cfg_path, config_save_path)
@@ -91,13 +102,14 @@ def accuracy_at_threshold_with_probs(
 
 
 def main():
+    log_message("Starting training run", training_log_path)
 
     # load dataset
-    print(f'{dataset_name = }')
-    print(f'{num_samples = }')
+    log_message(f'{dataset_name = }', training_log_path)
+    log_message(f'{num_samples = }', training_log_path)
 
     if use_local_data:
-        print(f'loading data from: {data_dir}')
+        log_message(f'loading data from: {data_dir}', training_log_path)
         ds, _ = load_data_folder(data_dir, num_samples, SPLIT=data_split, cache_dir=cache_dir)
     else:
         ds, _ = load_data_normal(dataset_name, num_samples, data_split)
@@ -132,27 +144,32 @@ def main():
         num_workers=num_workers,
         pin_memory=True,
     )
+    criterion = nn.BCEWithLogitsLoss()
 
     if mlp == "PatchSelector":
-        print(f'Training started using MLP: {mlp}')
+        log_message(f'Training started using MLP: {mlp}', training_log_path)
         patch_selector = PatchSelector().to(device)
     elif mlp == "PatchSelectorWithSoftmax":
-        print(f'Training started using MLP: {mlp}')
+        log_message(f'Training started using MLP: {mlp}', training_log_path)
         patch_selector = PatchSelectorWithSoftmax().to(device)
+        criterion = nn.BCELoss()
     elif mlp == "SimplePatchSelector":
-        print(f'Training started using MLP: {mlp}')
+        log_message(f'Training started using MLP: {mlp}', training_log_path)
         patch_selector = SimplePatchSelector().to(device)
     elif mlp == "SimplePatchSelectorWithDropout":
-        print(f'Training started using MLP: {mlp}')
+        log_message(f'Training started using MLP: {mlp}', training_log_path)
         patch_selector = SimplePatchSelectorWithDropout().to(device)
     elif mlp == "PatchSelectorResBlock":
-        print(f'Training started using MLP: {mlp}')
+        log_message(f'Training started using MLP: {mlp}', training_log_path)
         patch_selector = PatchSelectorResBlock().to(device)
+    elif mlp == "LightweightPatchSelector":
+        log_message(f'Training started using MLP: {mlp}', training_log_path)
+        patch_selector = LightweightPatchSelector().to(device)
     else: 
-        print(f"Please select an MLP in {cfg_path}")
+        log_message(f"Please select an MLP in {cfg_path}", training_log_path)
 
     # criterion = nn.BCEWithLogitsLoss()
-    criterion = nn.BCELoss()
+    # criterion = nn.BCELoss()
     # optimizer = torch.optim.Adam(patch_selector.parameters(), lr=cfg["lr"])
     optimizer = torch.optim.AdamW(patch_selector.parameters(), lr=cfg["lr"])
 
@@ -202,7 +219,7 @@ def main():
     metadata_path = os.path.join(save_dir, "run_metadata.yaml")
     with open(metadata_path, "w") as f:
         yaml.safe_dump(run_metadata, f, sort_keys=False)
-    print(f"Saved run metadata to {metadata_path}")
+    log_message(f"Saved run metadata to {metadata_path}", training_log_path)
 
 
     best_val_loss: Optional[float] = None
@@ -211,9 +228,9 @@ def main():
     history_rows = []
 
 
-    print(f'{train_loader = }')
-    print(f'{val_loader = }')
-    print(f'{num_classes = }')
+    log_message(f'{train_loader = }', training_log_path)
+    log_message(f'{val_loader = }', training_log_path)
+    log_message(f'{num_classes = }', training_log_path)
 
 
     for epoch in range(1, epochs+1):
@@ -251,7 +268,11 @@ def main():
 
             total_loss += loss.item()
             # total_acc += accuracy_at_threshold(logits.detach(), targets)
-            total_acc += accuracy_at_threshold_with_probs(logits, targets)
+            if mlp == "PatchSelectorWithSoftmax":
+                total_acc += accuracy_at_threshold_with_probs(logits, targets)
+            else:
+                total_acc += accuracy_at_threshold(logits, targets)
+            # total_acc += accuracy_at_threshold_with_probs(logits, targets)
             steps += 1
             # print(f'{total_loss = }')
             # break
@@ -286,7 +307,12 @@ def main():
                 logits = patch_selector(patches).squeeze(-1) 
                 loss = criterion(logits, targets)
                 val_total_loss += loss.item()
-                val_total_acc += accuracy_at_threshold(logits, targets)
+
+                if mlp == "PatchSelectorWithSoftmax":
+                    val_total_acc += accuracy_at_threshold_with_probs(logits, targets)
+                else:
+                    val_total_acc += accuracy_at_threshold(logits, targets)
+                # val_total_acc += accuracy_at_threshold_with_probs(logits, targets)
                 val_steps += 1
         # print(f'val steps {val_steps }')
 
@@ -303,8 +329,14 @@ def main():
             "val_loss": avg_val_loss,
             "val_bit_acc@0.5": avg_val_acc,
         }
-        print(f"Epoch {epoch}/{epochs} Train Loss: {avg_loss:.4f} Bit Acc@0.5: {avg_acc:.4f}")
-        print(f"Epoch {epoch}/{epochs} Val   Loss: {avg_val_loss:.4f} Bit Acc@0.5: {avg_val_acc:.4f}")
+        log_message(
+            f"Epoch {epoch}/{epochs} Train Loss: {avg_loss:.4f} Bit Acc@0.5: {avg_acc:.4f}",
+            training_log_path,
+        )
+        log_message(
+            f"Epoch {epoch}/{epochs} Val   Loss: {avg_val_loss:.4f} Bit Acc@0.5: {avg_val_acc:.4f}",
+            training_log_path,
+        )
 
         # checkpoint = {
         #     "epoch": epoch,
@@ -332,10 +364,7 @@ def main():
             best_val_loss = avg_val_loss
             best_ckpt_path = os.path.join(save_dir, "checkpoint_best.pt")
             torch.save(checkpoint, best_ckpt_path)
-            print(f"Saved new best model to {best_ckpt_path}")
-
-
-
+            log_message(f"Saved new best model to {best_ckpt_path}", training_log_path)
 
 
 if __name__ == "__main__":
