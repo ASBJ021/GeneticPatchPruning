@@ -1,0 +1,451 @@
+from typing import List, Tuple, Optional
+import os
+import sys
+from pathlib import Path
+import shutil
+from datetime import datetime
+
+# Ensure project root is available on sys.path when running the script directly
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import clip
+import yaml
+from timm.models.mlp_mixer import MixerBlock
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+from torchvision import transforms
+
+from gpp.dataset.data_utils import load_data_normal, build_dataloaders, PatchIndexDataset, _load_jsonl, split_dataset, load_data_folder
+from gpp.model.model import PatchSelector, PatchSelectorWithSoftmax, images_to_patches, SimplePatchSelector, SimplePatchSelectorWithDropout, PatchSelectorResBlock
+
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data.distributed import DistributedSampler
+
+
+cfg_path = './config/training_config.yaml'
+print (f'Loading config from {cfg_path}')
+
+with open(cfg_path, "r") as f:
+    cfg = yaml.safe_load(f)
+
+device = cfg.get("device", "cuda")
+if not torch.cuda.is_available():
+    device = "cpu"
+
+
+to_pil = transforms.ToPILImage()
+
+num_samples  = cfg["num_samples"]
+dataset_name = cfg["dataset_name"]
+data_dir = cfg["data_dir"]
+use_local_data = cfg["use_local_data"]
+data_split = cfg["split"]
+cache_dir = cfg["cache_dir"]
+model_id     = cfg["model_id"]
+vis = cfg["visualize"]
+annotation_path = cfg["annotation_path"]
+img_size = cfg["img_size"]
+batch_size = cfg["batch_size"]
+seed = cfg["seed"]
+num_workers = cfg["num_workers"]
+epochs = cfg["epochs"]
+save_dir = cfg["save_dir"]
+exp_name = cfg["exp_name"]
+mlp = cfg['mlp']
+
+save_dir = f'{save_dir}/{exp_name}'
+print(f'{save_dir = }')
+
+Path(save_dir).mkdir(parents=True, exist_ok=True)
+
+config_save_path = os.path.join(save_dir, "training_config.yaml")
+shutil.copy(cfg_path, config_save_path)
+
+
+def setup_distributed():
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    distributed = world_size > 1
+    if distributed:
+        local_rank = int(os.environ["LOCAL_RANK"])
+        torch.cuda.set_device(local_rank)
+        dist.init_process_group(backend="nccl", init_method="env://")
+        device = torch.device(f"cuda:{local_rank}")
+        rank = dist.get_rank()
+    else:
+        rank = 0
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    return distributed, rank, world_size, device
+
+def cleanup_distributed(distributed: bool):
+    if distributed and dist.is_initialized():
+        dist.destroy_process_group()
+
+
+def accuracy_at_threshold(logits: torch.Tensor, targets: torch.Tensor, thresh: float = 0.5) -> float:
+    """Simple multi-label accuracy: fraction of correctly predicted bits over all bits."""
+    # print(len(logits), len(targets))
+    with torch.no_grad():
+        preds = (torch.sigmoid(logits) >= thresh).float()
+        correct = (preds == targets).float().mean().item()
+    return correct
+
+def accuracy_at_threshold_with_probs(
+    probs: torch.Tensor,
+    targets: torch.Tensor,
+    thresh: float = 0.5
+) -> float:
+    """
+    probs: model outputs AFTER sigmoid, shape [B, ..., 1] or [B, ...]
+    targets: binary targets in {0,1}, same shape
+    """
+    with torch.no_grad():
+        preds = (probs >= thresh).float()
+        correct = (preds == targets).float().mean().item()
+    # print(f'{correct = }')
+    return correct
+
+
+def main():
+
+    distributed, rank, world_size, device = setup_distributed()
+    torch.backends.cudnn.benchmark = True
+
+    # load dataset
+    print(f'{dataset_name = }')
+    print(f'{num_samples = }')
+
+    if use_local_data:
+        print(f'loading data from: {data_dir}')
+        ds, _ = load_data_folder(data_dir, num_samples, SPLIT=data_split, cache_dir=cache_dir)
+    else:
+        ds, _ = load_data_normal(dataset_name, num_samples, data_split)
+    # print(ds)
+
+    # loading CLIP model and processor
+    print(f'Loading CLIP model: {model_id} on {device}...')
+    model, processor = clip.load(model_id, device)  # Load on CPU initially
+    model.float()  # Ensure model is in float32
+
+    full_dataset = PatchIndexDataset(ds=ds, jsonl_path=annotation_path, img_size=img_size)
+    num_classes = full_dataset.num_classes
+
+    train_subset, val_subset, test_subset = split_dataset(full_dataset, ratios=(0.7, 0.15, 0.15), seed=seed)
+
+    train_sampler = DistributedSampler(train_subset, shuffle=True) if distributed else None
+    val_sampler = DistributedSampler(val_subset, shuffle=False) if distributed else None
+    test_sampler = DistributedSampler(test_subset, shuffle=False) if distributed else None
+
+
+    train_loader = DataLoader(
+        train_subset,
+        batch_size=batch_size,
+        shuffle=(train_sampler is None),
+        sampler=train_sampler,
+        num_workers=num_workers,
+        pin_memory=True,
+        persistent_workers=(num_workers > 0),
+    )
+    # print(f'{train_loader = }')
+
+    val_loader = DataLoader(
+        val_subset,
+        batch_size=batch_size,
+        shuffle=False,
+        sampler=val_sampler,
+        num_workers=num_workers,
+        pin_memory=True,
+        persistent_workers=(num_workers > 0),
+    )
+
+    test_loader = DataLoader(
+        test_subset,
+        batch_size=batch_size,
+        shuffle=False,
+        sampler=test_sampler,
+        num_workers=num_workers,
+        pin_memory=True,
+        persistent_workers=(num_workers > 0),
+    )
+
+    criterion = nn.BCEWithLogitsLoss()
+    
+    if mlp == "PatchSelector":
+        print(f'Training started using MLP: {mlp}')
+        patch_selector = PatchSelector().to(device)
+        if distributed:
+            patch_selector = DDP(
+                patch_selector,
+                device_ids=[device.index],
+                output_device=device.index,
+            )
+        
+    elif mlp == "PatchSelectorWithSoftmax":
+        print(f'Training started using MLP: {mlp}')
+        patch_selector = PatchSelectorWithSoftmax().to(device)
+        if distributed:
+            patch_selector = DDP(
+                patch_selector,
+                device_ids=[device.index],
+                output_device=device.index,
+            )
+        criterion = nn.BCELoss()
+    elif mlp == "SimplePatchSelector":
+        print(f'Training started using MLP: {mlp}')
+        patch_selector = SimplePatchSelector().to(device)
+        if distributed:
+            patch_selector = DDP(
+                patch_selector,
+                device_ids=[device.index],
+                output_device=device.index,
+            )
+    elif mlp == "SimplePatchSelectorWithDropout":
+        print(f'Training started using MLP: {mlp}')
+        patch_selector = SimplePatchSelectorWithDropout().to(device)
+        if distributed:
+            patch_selector = DDP(
+                patch_selector,
+                device_ids=[device.index],
+                output_device=device.index,
+            )
+    elif mlp == "PatchSelectorResBlock":
+        print(f'Training started using MLP: {mlp}')
+        patch_selector = PatchSelectorResBlock().to(device)
+        if distributed:
+            patch_selector = DDP(
+                patch_selector,
+                device_ids=[device.index],
+                output_device=device.index,
+            )
+    else: 
+        print(f"Please select an MLP in {cfg_path}")
+
+    # criterion = nn.BCEWithLogitsLoss()
+    # criterion = nn.BCELoss()
+    
+    # optimizer = torch.optim.Adam(patch_selector.parameters(), lr=cfg["lr"])
+    optimizer = torch.optim.AdamW(patch_selector.parameters(), lr=cfg["lr"])
+
+
+    run_metadata = {
+        "timestamp": datetime.now().isoformat(),
+
+        # Config + experiment
+        "cfg_path": cfg_path,
+        "save_dir": save_dir,
+        "exp_name": exp_name,
+        "dataset_name": dataset_name,
+        "num_samples": num_samples,
+        "split": data_split,
+        "seed": seed,
+
+        # Model info
+        "model_class": patch_selector.__class__.__name__,
+        "model_module": patch_selector.__class__.__module__,
+        "num_model_params": int(sum(p.numel() for p in patch_selector.parameters())),
+        "num_classes": int(num_classes),
+
+        # Loss info
+        "loss_function": criterion.__class__.__name__,
+        "loss_params": {
+            "pos_weight": (
+                criterion.pos_weight.detach().cpu().tolist()
+                if getattr(criterion, "pos_weight", None) is not None
+                else None
+            )
+        },
+
+        # Optimizer info
+        "optimizer": optimizer.__class__.__name__,
+        "optimizer_params": dict(optimizer.defaults),  # lr, betas, eps, weight_decay, etc.
+
+        # Training setup
+        "epochs": int(epochs),
+        "batch_size": int(batch_size),
+        "num_workers": int(num_workers),
+        "device": str(device),
+        "clip_model_id": model_id,
+
+        
+    }
+
+    if rank == 0:
+        metadata_path = os.path.join(save_dir, "run_metadata.yaml")
+        with open(metadata_path, "w") as f:
+            yaml.safe_dump(run_metadata, f, sort_keys=False)
+        print(f"Saved run metadata to {metadata_path}")
+
+
+    best_val_loss: Optional[float] = None
+    metrics_path = os.path.join(save_dir, "metrics.jsonl")
+    history_csv = os.path.join(save_dir, "history.csv")
+    history_rows = []
+
+
+    print(f'{train_loader = }')
+    print(f'{val_loader = }')
+    print(f'{num_classes = }')
+
+
+    for epoch in range(1, epochs+1):
+        if distributed and train_sampler is not None:
+            train_sampler.set_epoch(epoch)
+
+        patch_selector.train()
+        total_loss = 0.0
+        total_acc = 0.0
+        steps = 0
+
+
+        for imgs, targets in tqdm(train_loader, desc=f"Train {epoch}/{epochs}", leave=False):
+            imgs = imgs.to(device, non_blocking=True)
+            # print(imgs.shape)
+        
+            targets = targets.to(device, non_blocking=True)
+            # print(targets.shape)
+
+            # convert images to clip [patches]
+            patches = images_to_patches(imgs, model, processor, device)
+            patches = torch.cat(patches, dim=0).to(device)
+            # print(len(patches))
+            # print(patches[0].shape)
+
+            logits = patch_selector(patches).squeeze(-1) 
+            
+            # print(logits.shape)
+
+            loss = criterion(logits, targets)
+
+            # print(loss)
+
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            # print(f'{loss = }')
+            optimizer.step()
+
+            total_loss += loss.item()
+            # total_acc += accuracy_at_threshold(logits.detach(), targets)
+            if mlp == "PatchSelectorWithSoftmax":
+                total_acc += accuracy_at_threshold_with_probs(logits, targets)
+            else:
+                total_acc += accuracy_at_threshold(logits, targets)
+            steps += 1
+            # print(f'{total_loss = }')
+            # break
+        # print(f'{steps = }')
+        avg_loss = total_loss / max(1, steps)
+        avg_acc = total_acc / max(1, steps)
+
+        # print(f'{avg_loss = }')
+        # print(f'{avg_acc = }')
+        
+
+        # Validation
+        patch_selector.eval()
+        val_total_loss = 0.0
+        val_total_acc = 0.0
+        val_steps = 0
+        with torch.no_grad():
+            for imgs, targets in tqdm(val_loader, desc=f"Val   {epoch}/{epochs}", leave=False):
+                # imgs = imgs.to(device, non_blocking=True)
+                # targets = targets.to(device, non_blocking=True)
+                imgs = imgs.to(device, non_blocking=True)
+                # print(imgs.shape)
+            
+                targets = targets.to(device, non_blocking=True)
+                # print(targets.shape)
+
+                # convert images to clip [patches]
+                patches = images_to_patches(imgs, model, processor, device)
+                patches = torch.cat(patches, dim=0).to(device)
+
+                # logits = model(imgs)
+                logits = patch_selector(patches).squeeze(-1) 
+                loss = criterion(logits, targets)
+                val_total_loss += loss.item()
+
+                if mlp == "PatchSelectorWithSoftmax":
+                    val_total_acc += accuracy_at_threshold_with_probs(logits, targets)
+                else:
+                    val_total_acc += accuracy_at_threshold(logits, targets)
+                val_steps += 1
+        # print(f'val steps {val_steps }')
+
+        avg_val_loss = val_total_loss / max(1, val_steps)
+        avg_val_acc = val_total_acc / max(1, val_steps)
+        # val_acc = v_acc / max(1, v_steps)
+        # print(f'{avg_val_loss = }')
+        # print(f'{avg_val_acc = }')
+
+        log = {
+            "epoch": epoch,
+            "train_loss": avg_loss,
+            "train_bit_acc@0.5": avg_acc,
+            "val_loss": avg_val_loss,
+            "val_bit_acc@0.5": avg_val_acc,
+        }
+        print(f"Epoch {epoch}/{epochs} Train Loss: {avg_loss:.4f} Bit Acc@0.5: {avg_acc:.4f}")
+        print(f"Epoch {epoch}/{epochs} Val   Loss: {avg_val_loss:.4f} Bit Acc@0.5: {avg_val_acc:.4f}")
+
+        # checkpoint = {
+        #     "epoch": epoch,
+        #     "model_state_dict": patch_selector.state_dict(),
+        #     "optimizer_state_dict": optimizer.state_dict(),
+        #     "train_loss": avg_loss,
+        #     "val_loss": avg_val_loss,
+        # }
+
+        # checkpoint = {
+        #     "epoch": epoch,
+        #     "model_state_dict": patch_selector.state_dict(),
+        #     "optimizer_state_dict": optimizer.state_dict(),
+        #     "optimizer_class": optimizer.__class__.__name__,
+        #     "optimizer_defaults": dict(optimizer.defaults),
+        #     "loss_function": criterion.__class__.__name__,
+        #     "train_loss": avg_loss,
+        #     "val_loss": avg_val_loss,
+        # }
+
+        # ckpt_path = os.path.join(save_dir, f"checkpoint_epoch_{epoch:03d}.pt")
+        # torch.save(checkpoint, ckpt_path)
+
+        # if best_val_loss is None or avg_val_loss < best_val_loss:
+        #     best_val_loss = avg_val_loss
+        #     best_ckpt_path = os.path.join(save_dir, "checkpoint_best.pt")
+        #     torch.save(checkpoint, best_ckpt_path)
+        #     print(f"Saved new best model to {best_ckpt_path}")
+
+        if rank == 0:
+            model_to_save = patch_selector.module if isinstance(patch_selector, DDP) else patch_selector
+
+            checkpoint = {
+                "epoch": epoch,
+                "model_state_dict": model_to_save.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "optimizer_class": optimizer.__class__.__name__,
+                "optimizer_defaults": dict(optimizer.defaults),
+                "loss_function": criterion.__class__.__name__,
+                "train_loss": avg_loss,
+                "val_loss": avg_val_loss,
+            }
+
+            ckpt_path = os.path.join(save_dir, f"checkpoint_epoch_{epoch:03d}.pt")
+            torch.save(checkpoint, ckpt_path)
+
+            if best_val_loss is None or avg_val_loss < best_val_loss:
+                best_val_loss = avg_val_loss
+                best_ckpt_path = os.path.join(save_dir, "checkpoint_best.pt")
+                torch.save(checkpoint, best_ckpt_path)
+                print(f"Saved new best model to {best_ckpt_path}")
+
+    cleanup_distributed(distributed)
+
+
+
+if __name__ == "__main__":
+    main()

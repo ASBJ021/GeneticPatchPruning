@@ -7,9 +7,9 @@ import sys
 import time
 from pathlib import Path
 from typing import Dict, List, Optional
+import numpy as np
 
 import clip
-import numpy as np
 import torch
 import yaml
 from tqdm import tqdm
@@ -58,7 +58,6 @@ def get_text_features(prompts, model, device: str) -> torch.Tensor:
     text_features = model.encode_text(text_tokens)
     text_features = text_features / text_features.norm(dim=-1, keepdim=True)
     return text_features
-
 
 def otsu_intraclass_variance(values: np.ndarray, threshold: float) -> float:
     hi = values >= threshold
@@ -122,6 +121,7 @@ def otsu_select_indices(
     return selected
 
 
+
 @torch.no_grad()
 def predict_with_selector_otsu(
     img,
@@ -131,6 +131,7 @@ def predict_with_selector_otsu(
     text_features: torch.Tensor,
     device: str,
     outputs_are_probs: bool,
+    otsu_bins: int,
     min_keep_tokens: int,
     max_keep_tokens: int,
 ):
@@ -241,6 +242,7 @@ def gpp_eval_otsu(
     dataset,
     text_features,
     device: str,
+    otsu_bins: int,
     min_keep_tokens: int,
     max_keep_tokens: int,
     save_per_img_metrics: bool,
@@ -267,6 +269,7 @@ def gpp_eval_otsu(
             text_features=text_features,
             device=device,
             outputs_are_probs=outputs_are_probs,
+            otsu_bins=otsu_bins,
             min_keep_tokens=min_keep_tokens,
             max_keep_tokens=max_keep_tokens,
         )
@@ -322,7 +325,7 @@ def gpp_eval_otsu(
 
 def main():
     parser = argparse.ArgumentParser(description="Evaluate selector with Otsu patch selection.")
-    parser.add_argument("--config", type=str, default=str(ROOT / "config" / "benchmark_ga_distill.yaml"))
+    parser.add_argument("--config", type=str, default=str(ROOT / "config" / "benchmark_ga.yaml"))
     args = parser.parse_args()
 
     with open(args.config, "r", encoding="utf-8") as f:
@@ -346,6 +349,7 @@ def main():
     save_dir = cfg.get("save_dir", "./benchmark_results")
 
     selection_cfg = cfg.get("selection", {})
+    otsu_bins = int(selection_cfg.get("otsu_bins", 256))
     min_keep_tokens = int(selection_cfg.get("min_keep_tokens", 1))
     max_keep_tokens = int(selection_cfg.get("max_keep_tokens", 0))
 
@@ -357,7 +361,7 @@ def main():
     print(f"Evaluating on dataset: {dataset_name} | split: {data_split}")
     print(f"Checkpoint: {gpp_ckpt}")
     print(
-        f"Selection mode: otsu_intraclass_variance (min_keep={min_keep_tokens}, max_keep={max_keep_tokens})"
+        f"Selection mode: otsu (bins={otsu_bins}, min_keep={min_keep_tokens}, max_keep={max_keep_tokens})"
     )
 
     if use_local_data:
@@ -372,10 +376,12 @@ def main():
     records = []
 
     if "clip" in strategies:
+        print(f'Evaluating on CLIP with all patches')
         clip_acc, clip_time = original_clip(clip_model, clip_proc, dataset, text_features, device)
         records.append({"strategy": "clip", "keep_pct": 100.0, "accuracy": clip_acc, "avg_time": clip_time})
 
     if "gpp" in strategies:
+        print(f'Evaluating on GPP with Otsu selection')
         selector, outputs_are_probs = build_selector(mlp, device)
         state = torch.load(gpp_ckpt, map_location=device)
         selector.load_state_dict(state.get("model_state_dict", state))
@@ -389,6 +395,7 @@ def main():
             dataset=dataset,
             text_features=text_features,
             device=device,
+            otsu_bins=otsu_bins,
             min_keep_tokens=min_keep_tokens,
             max_keep_tokens=max_keep_tokens,
             save_per_img_metrics=save_per_img_metrics,
